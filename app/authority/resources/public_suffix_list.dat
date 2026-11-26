@@ -1,0 +1,142 @@
+// ===BEGIN ICANN DOMAINS===
+// gTLDs
+com
+org
+net
+edu
+gov
+mil
+int
+info
+biz
+io
+ai
+co
+me
+app
+dev
+tech
+online
+store
+site
+xyz
+club
+design
+pro
+mobi
+
+// ccTLDs
+de
+uk
+fr
+jp
+cn
+in
+ca
+au
+br
+ru
+nl
+se
+es
+it
+ch
+eu
+us
+za
+sg
+mx
+nz
+
+// United Kingdom
+co.uk
+org.uk
+gov.uk
+ac.uk
+net.uk
+ltd.uk
+plc.uk
+me.uk
+
+// Australia
+com.au
+net.au
+org.au
+edu.au
+gov.au
+
+// New Zealand
+co.nz
+net.nz
+org.nz
+govt.nz
+edu.nz
+
+// Japan
+co.jp
+ne.jp
+or.jp
+go.jp
+ac.jp
+tokyo.jp
+
+// India
+co.in
+net.in
+org.in
+gen.in
+firm.in
+ind.in
+gov.in
+edu.in
+res.in
+
+// Brazil
+com.br
+net.br
+org.br
+gov.br
+edu.br
+
+// China
+com.cn
+net.cn
+org.cn
+gov.cn
+edu.cn
+
+// South Africa
+co.za
+net.za
+org.za
+gov.za
+
+// Singapore
+com.sg
+net.sg
+org.sg
+gov.sg
+
+// Mexico
+com.mx
+org.mx
+gob.mx
+edu.mx
+
+// Cook Islands (Wildcard and Exception rules)
+*.ck
+!www.ck
+
+// ===END ICANN DOMAINS===
+
+// ===BEGIN PRIVATE DOMAINS===
+github.io
+s3.amazonaws.com
+blogspot.com
+vercel.app
+pages.dev
+herokuapp.com
+gitlab.io
+netlify.app
+wordpress.com
+// ===END PRIVATE DOMAINS===

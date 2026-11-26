@@ -1,0 +1,13 @@
+{
+  "resource_name": "public_suffix_list.dat",
+  "source_provenance": "Mozilla Public Suffix List Initiative (https://github.com/publicsuffix/list)",
+  "license": "Mozilla Public License 2.0 (MPL 2.0)",
+  "snapshot_date": "2026-11-01",
+  "sha256": "34464e13557f37b74c27af516396da602079389432ef95e5467413810f7a6f7c",
+  "size_bytes": 988,
+  "sections": [
+    "ICANN",
+    "PRIVATE"
+  ],
+  "status": "BUNDLED_VERIFIED"
+}
