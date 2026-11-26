@@ -1009,6 +1009,8 @@ def _get_page_footer_html() -> str:
           <a href="/accessibility">Accessibility</a>
           <a href="/terms">Terms of Use</a>
           <a href="/privacy">Privacy Policy</a>
+          <a href="/sitemap">Sitemap</a>
+          <a href="/sitemap.xml">XML Sitemap</a>
         </div>
       </div>
     </div>
@@ -1643,6 +1645,51 @@ curl -X POST "http://127.0.0.1:8501/api/check" \\
             <div class="feature-box">
               <h3 class="feature-box-title">Zero Third-Party Pixels</h3>
               <p class="feature-box-desc">No Facebook Pixel, no ad network trackers, and no fingerprinting scripts are loaded on any page.</p>
+            </div>
+          </div>
+        </div>
+        """,
+    },
+
+    "/sitemap": {
+        "category": "SITE DIRECTORY & INDEX",
+        "title": "RizeMetrics HTML Sitemap",
+        "subtitle": "Complete directory of all tools, SEO guides, documentation, and company pages on RizeMetrics.",
+        "active_nav": "resources",
+        "body": """
+        <div class="content-section">
+          <h2 class="section-title">All RizeMetrics Pages</h2>
+          <p class="prose-text">Browse our complete platform hierarchy below, or view our machine-readable <a href="/sitemap.xml" style="color:var(--primary); font-weight:700;">XML Sitemap (/sitemap.xml)</a> for search engine crawlers.</p>
+
+          <div class="feature-grid-3">
+            <div class="feature-box">
+              <h3 class="feature-box-title">Core SEO Tools</h3>
+              <ul style="list-style:none; padding:0; margin:0.75rem 0 0; display:flex; flex-direction:column; gap:0.6rem;">
+                <li><a href="/" style="color:var(--primary); font-weight:700; text-decoration:none;">&rarr; Free DA PA &amp; Spam Score Checker</a></li>
+                <li><a href="/#tabInbound" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; Backlink &amp; Referring Domain Explorer</a></li>
+                <li><a href="/spam-guide" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; 27-Signal Spam Audit Guide</a></li>
+              </ul>
+            </div>
+
+            <div class="feature-box">
+              <h3 class="feature-box-title">Resources &amp; Learning</h3>
+              <ul style="list-style:none; padding:0; margin:0.75rem 0 0; display:flex; flex-direction:column; gap:0.6rem;">
+                <li><a href="/blog" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; SEO &amp; Graph Intelligence Blog</a></li>
+                <li><a href="/seo-learning-center" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; SEO Learning Center</a></li>
+                <li><a href="/beginners-guide" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; Beginner's Guide to SEO</a></li>
+                <li><a href="/how-to-guides" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; Actionable How-To Guides</a></li>
+              </ul>
+            </div>
+
+            <div class="feature-box">
+              <h3 class="feature-box-title">Company &amp; Legal</h3>
+              <ul style="list-style:none; padding:0; margin:0.75rem 0 0; display:flex; flex-direction:column; gap:0.6rem;">
+                <li><a href="/about" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; About RizeMetrics</a></li>
+                <li><a href="/contact" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; Contact Us</a></li>
+                <li><a href="/accessibility" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; Accessibility Statement</a></li>
+                <li><a href="/terms" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; Terms of Use</a></li>
+                <li><a href="/privacy" style="color:var(--primary); font-weight:600; text-decoration:none;">&rarr; Privacy Policy</a></li>
+              </ul>
             </div>
           </div>
         </div>

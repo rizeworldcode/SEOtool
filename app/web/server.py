@@ -3275,6 +3275,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <a href="/accessibility">Accessibility</a>
           <a href="/terms">Terms of Use</a>
           <a href="/privacy">Privacy Policy</a>
+          <a href="/sitemap">Sitemap</a>
+          <a href="/sitemap.xml">XML Sitemap</a>
         </div>
       </div>
     </div>
@@ -3829,6 +3831,49 @@ def handle_web_request(
     if method_upper == "GET":
         if path in ("/", "/index.html"):
             return int(HTTPStatus.OK), "text/html; charset=utf-8", DASHBOARD_HTML
+
+        if path in ("/sitemap.xml", "/sitemap_index.xml"):
+            base_url = os.environ.get("SITE_BASE_URL", "https://rizemetricstool.com").rstrip("/")
+            sitemap_entries = [
+                ("/", "daily", "1.0"),
+                ("/spam-guide", "weekly", "0.9"),
+                ("/seo-learning-center", "weekly", "0.9"),
+                ("/beginners-guide", "weekly", "0.8"),
+                ("/how-to-guides", "weekly", "0.8"),
+                ("/blog", "weekly", "0.8"),
+                ("/about", "monthly", "0.7"),
+                ("/contact", "monthly", "0.7"),
+                ("/sitemap", "monthly", "0.6"),
+                ("/accessibility", "monthly", "0.5"),
+                ("/terms", "monthly", "0.5"),
+                ("/privacy", "monthly", "0.5"),
+            ]
+            urls_xml = "\n".join(
+                f"  <url>\n"
+                f"    <loc>{base_url}{route if route != '/' else '/'}</loc>\n"
+                f"    <lastmod>2026-11-26</lastmod>\n"
+                f"    <changefreq>{freq}</changefreq>\n"
+                f"    <priority>{prio}</priority>\n"
+                f"  </url>"
+                for route, freq, prio in sitemap_entries
+            )
+            xml_payload = (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                f"{urls_xml}\n"
+                "</urlset>\n"
+            )
+            return int(HTTPStatus.OK), "application/xml; charset=utf-8", xml_payload
+
+        if path == "/robots.txt":
+            base_url = os.environ.get("SITE_BASE_URL", "https://rizemetricstool.com").rstrip("/")
+            robots_txt = (
+                "User-agent: *\n"
+                "Allow: /\n"
+                "Disallow: /api/\n\n"
+                f"Sitemap: {base_url}/sitemap.xml\n"
+            )
+            return int(HTTPStatus.OK), "text/plain; charset=utf-8", robots_txt
 
         if is_footer_page(path):
             html_page = get_footer_page_html(path)
