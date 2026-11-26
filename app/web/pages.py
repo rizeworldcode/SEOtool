@@ -838,14 +838,50 @@ def _get_page_styles() -> str:
       .feature-grid-3, .feature-grid-2 {
         grid-template-columns: 1fr;
       }
+      .footer-cta-left {
+        flex-wrap: wrap;
+        gap: 0.35rem 0.85rem;
+      }
+      .footer-cta-subtitle {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+      }
     }
 
     @media (max-width: 768px) {
       .footer-cta-card {
-        padding: 1.4rem 1.25rem;
-        border-radius: 20px;
+        padding: 1.35rem 1.25rem;
+        border-radius: 22px;
         flex-direction: column;
         align-items: flex-start;
+        gap: 1rem;
+      }
+      .footer-cta-left {
+        flex-direction: column;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        width: 100%;
+      }
+      .footer-cta-title {
+        font-size: 1.25rem;
+        white-space: normal;
+        line-height: 1.25;
+      }
+      .footer-cta-subtitle {
+        font-size: 0.88rem;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+        line-height: 1.45;
+      }
+      .footer-cta-right {
+        width: 100%;
+      }
+      .footer-cta-btn {
+        width: 100%;
+        text-align: center;
       }
       .footer-main-wrap {
         border-top-left-radius: 50% 28px;

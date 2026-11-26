@@ -2473,6 +2473,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       padding-top: 2rem;
       grid-column: 1 / -1;
     }
+    .footer-cta-left {
+      flex-wrap: wrap;
+      gap: 0.35rem 0.85rem;
+    }
+    .footer-cta-subtitle {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+    }
   }
 
   @media (max-width: 768px) {
@@ -2483,16 +2492,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       grid-template-columns: 1fr !important;
     }
     .footer-cta-card {
-      padding: 1.4rem 1.25rem;
-      border-radius: 20px;
+      padding: 1.35rem 1.25rem;
+      border-radius: 22px;
       flex-direction: column;
       align-items: flex-start;
+      gap: 1rem;
+    }
+    .footer-cta-left {
+      flex-direction: column;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      width: 100%;
     }
     .footer-cta-title {
-      font-size: 1.35rem;
+      font-size: 1.25rem;
+      white-space: normal;
+      line-height: 1.25;
     }
     .footer-cta-subtitle {
-      font-size: 0.92rem;
+      font-size: 0.88rem;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      line-height: 1.45;
+    }
+    .footer-cta-right {
+      width: 100%;
     }
     .footer-cta-btn {
       width: 100%;
