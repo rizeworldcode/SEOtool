@@ -3976,4 +3976,6 @@ def run_web_server(
 
 
 if __name__ == "__main__":
-    run_web_server()
+    _host = os.environ.get("HOST", "0.0.0.0")
+    _port = int(os.environ.get("PORT", "8501"))
+    run_web_server(host=_host, port=_port)
