@@ -3527,7 +3527,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <span style="color: #ee591e;">Rize</span><span style="color: #2a7c37;">Metrics</span>
         </div>
       </div>
-      <h2 class="launch-title">We Are Launching Tonight at 8:20 PM!</h2>
+      <h2 class="launch-title">We Are Launching Tonight at 9:00 PM!</h2>
       <p class="launch-subtitle">
         Get ready for unlimited Domain Authority (DA), Page Authority (PA), Bulk URL CSV Analysis &amp; 27-Signal Spam Score Intelligence. The ribbon cuts automatically when the timer hits zero.
       </p>
@@ -5188,14 +5188,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const overlay = document.getElementById('launchCountdownOverlay');
       if (!overlay) return;
 
-      // Launch target: Today at 8:20 PM (20:20:00) IST (UTC+05:30).
-      // If page is opened between 8:20 PM and 8:35 PM IST while testing after deploy,
-      // run a live 12-second countdown so the automatic ribbon-cutting & curtain reveal can be tested live.
-      const LAUNCH_HOUR = 20;
-      const LAUNCH_MINUTE = 20;
+      // Launch target: Today at 9:00 PM (21:00:00) IST (UTC+05:30)
+      const LAUNCH_HOUR = 21;
+      const LAUNCH_MINUTE = 0;
       const LAUNCH_SECOND = 0;
       const ALLOWED_LAUNCH_DATES = new Set(['__SERVER_LAUNCH_DATE_IST__', '2026-11-27']);
-      let testPreviewTargetEpoch = null;
 
       function getRemainingLaunchMs() {
         const now = new Date();
@@ -5219,18 +5216,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
         const elapsedTodayMs = ((curHours * 3600) + (curMins * 60) + curSecs) * 1000 + curMillis;
         const targetTodayMs = ((LAUNCH_HOUR * 3600) + (LAUNCH_MINUTE * 60) + LAUNCH_SECOND) * 1000;
-        const windowEndMs = ((20 * 3600) + (38 * 60)) * 1000; // 8:38 PM IST test window
-
-        if (elapsedTodayMs < targetTodayMs) {
-          return targetTodayMs - elapsedTodayMs;
-        }
-        if (elapsedTodayMs >= targetTodayMs && elapsedTodayMs < windowEndMs) {
-          if (testPreviewTargetEpoch === null) {
-            testPreviewTargetEpoch = Date.now() + 10000; // 10-second live countdown for immediate ribbon-cut test
-          }
-          return testPreviewTargetEpoch - Date.now();
-        }
-        return 0;
+        return targetTodayMs - elapsedTodayMs;
       }
 
       let wasCountingDown = false;
