@@ -11,12 +11,6 @@ import base64
 
 _LOGO_FILE = os.path.join(os.path.dirname(__file__), "logo.png")
 _LOGO_SRC = "/logo.png"
-if os.path.exists(_LOGO_FILE):
-    try:
-        with open(_LOGO_FILE, "rb") as _f:
-            _LOGO_SRC = f"data:image/png;base64,{base64.b64encode(_f.read()).decode('ascii')}"
-    except Exception:
-        _LOGO_SRC = "/logo.png"
 
 
 def _get_page_styles() -> str:
@@ -1000,7 +994,9 @@ def _get_page_footer_html() -> str:
     <div class="footer-bottom-bar">
       <div class="footer-bottom-container">
         <div class="footer-bottom-logo">
-          <span class="brand-title" style="color:#ffffff; font-size:1.15rem; letter-spacing:-0.01em;">RIZEMETRICS</span>
+          <a href="https://rizemetricstool.com/" style="text-decoration:none;">
+            <span class="brand-title" style="color:#ffffff; font-size:1.15rem; letter-spacing:-0.01em;">RIZEMETRICS</span>
+          </a>
         </div>
         <div class="footer-bottom-copy">
           &copy; Rizeworld Digital Marketing Company. All rights reserved. RizeMetrics is an automated SEO intelligence and authority scoring platform.
@@ -1024,17 +1020,54 @@ def render_page(
     subtitle: str,
     body_html: str,
     active_nav: str = "",
+    canonical_path: str = "/",
 ) -> str:
     """Render a complete standalone HTML page adhering to the signature RizeMetrics theme."""
     styles = _get_page_styles()
     footer = _get_page_footer_html()
+    base_url = os.environ.get("SITE_BASE_URL", "https://rizemetricstool.com").rstrip("/")
+    canonical_url = f"{base_url}{canonical_path if canonical_path.startswith('/') else '/' + canonical_path}"
+    safe_title = html.escape(title)
+    safe_subtitle = html.escape(subtitle)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{html.escape(title)} — RizeMetrics</title>
+  <title>{safe_title} — RizeMetrics - Unlimited Domain &amp; Page Authority Checker</title>
+
+  <!-- Primary SEO Meta Tags -->
+  <meta name="title" content="{safe_title} — RizeMetrics - Unlimited Domain &amp; Page Authority Checker">
+  <meta name="description" content="{safe_subtitle}">
+  <meta name="keywords" content="DA PA checker, domain authority checker, page authority checker, free DA checker, free PA checker, domain authority tool, page authority tool, spam score checker, website authority checker, backlink checker, bulk DA PA checker, SEO checker">
+  <meta name="author" content="RizeMetrics">
+
+  <!-- Canonical URL -->
+  <link rel="canonical" href="{canonical_url}">
+
+  <!-- Open Graph Meta Tags (Facebook, LinkedIn, etc.) -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{safe_title} — RizeMetrics - Unlimited Domain &amp; Page Authority Checker">
+  <meta property="og:description" content="{safe_subtitle}">
+  <meta property="og:url" content="{canonical_url}">
+  <meta property="og:site_name" content="RizeMetrics">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:image" content="https://rizemetricstool.com/">
+  <meta property="og:image:alt" content="RizeMetrics Free Domain Authority and Page Authority Checker">
+
+  <!-- Twitter Card Meta Tags -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{safe_title} — RizeMetrics - Unlimited Domain &amp; Page Authority Checker">
+  <meta name="twitter:description" content="{safe_subtitle}">
+  <meta name="twitter:image" content="https://rizemetricstool.com/">
+  <meta name="twitter:image:alt" content="RizeMetrics Free DA PA Checker">
+
+  <!-- Optional SEO Metadata -->
+  <meta name="application-name" content="RizeMetrics">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <link rel="shortcut icon" type="image/png" href="/logo.png">
+  <link rel="apple-touch-icon" href="/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@500;600;700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -1046,8 +1079,8 @@ def render_page(
 
   <!-- Floating Navigation Bar with Image 2 Signature Capsule + RW Logo -->
   <header class="nav-container">
-    <a href="/" class="brand-group">
-      <img src="{_LOGO_SRC}" alt="RW Logo" class="brand-logo-img" />
+    <a href="https://rizemetricstool.com/" class="brand-group">
+      <img src="{_LOGO_SRC}" alt="RizeMetrics Logo" class="brand-logo-img" />
       <div>
         <span class="brand-title"><span class="brand-rize">Rize</span><span class="brand-metrics">Metrics</span></span>
         <span class="brand-subtitle">Graph Authority &amp; PageRank Engine</span>
@@ -1717,4 +1750,5 @@ def get_footer_page_html(path: str) -> Optional[str]:
         subtitle=page_data["subtitle"],
         body_html=page_data["body"],
         active_nav=page_data.get("active_nav", ""),
+        canonical_path=normalized,
     )
