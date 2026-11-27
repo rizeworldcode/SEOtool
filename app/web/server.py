@@ -25,6 +25,7 @@ import sqlite3
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Tuple
@@ -46,6 +47,10 @@ from app.web.pages import get_footer_page_html, is_footer_page
 
 # Trigger background dataset warmup on server module load so first request is instant
 warmup_authority_datasets_async("./data/linkpilot.db")
+
+# Capture server startup date in IST (UTC+5:30) for today's 8:15 PM IST launch countdown
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+SERVER_LAUNCH_DATE_IST = datetime.now(_IST_TZ).strftime("%Y-%m-%d")
 
 
 # ==============================================================================
@@ -96,10 +101,15 @@ _CSV_HEADER_STOPWORDS = {
 }
 
 
+_VALID_URL_OR_DOMAIN_RE = re.compile(
+    r"^(?:https?://)?(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24}(?:[:/?#].*)?$"
+)
+
+
 def extract_clean_bulk_tokens(raw_items: List[str]) -> List[str]:
     """
     Parse and filter a list of raw URL/domain strings (or comma/newline-delimited blocks),
-    returning clean candidate URL/domain tokens.
+    returning clean candidate URL/domain tokens while ignoring numeric CSV columns like '567.3K'.
     """
     tokens: List[str] = []
     for item in raw_items:
@@ -112,8 +122,9 @@ def extract_clean_bulk_tokens(raw_items: List[str]) -> List[str]:
             low = cleaned.lower()
             if low in _CSV_HEADER_STOPWORDS:
                 continue
-            # Must look like a URL or domain containing a dot (e.g. example.com)
             if "." not in cleaned or len(cleaned) < 4:
+                continue
+            if not _VALID_URL_OR_DOMAIN_RE.match(cleaned):
                 continue
             tokens.append(cleaned)
     return tokens
@@ -752,7 +763,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
 
     .hero-inner-container {
-      max-width: 860px;
+      max-width: 960px;
       width: 100%;
       margin: 0 auto;
       position: relative;
@@ -786,7 +797,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     /* Floating Capsule Search Bar Form */
     .capsule-search-form {
-      max-width: 780px;
+      max-width: 900px;
       width: 100%;
       margin: 0 auto 0.85rem;
       box-sizing: border-box;
@@ -803,6 +814,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       transition: all 0.25s ease;
       width: 100%;
       box-sizing: border-box;
+      gap: 0.4rem;
     }
 
     .capsule-search-pill:focus-within {
@@ -816,20 +828,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       color: #94a3b8;
-      margin-right: 0.65rem;
+      margin-right: 0.45rem;
       flex-shrink: 0;
     }
 
     .capsule-url-input {
-      flex: 1;
+      flex: 1 1 auto;
       border: none;
       outline: none;
       background: transparent;
-      font-size: 1.02rem;
+      font-size: 1.0rem;
       font-weight: 500;
       color: #0f172a;
       font-family: inherit;
       min-width: 0;
+      padding-right: 0.85rem;
+      margin-right: 0.25rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      overflow: hidden;
     }
 
     .capsule-url-input::placeholder {
@@ -1111,6 +1128,196 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       background: #fee2e2;
       color: #b91c1c;
       border: 1px solid #fecaca;
+    }
+
+    /* =====================================================================
+       8:15 PM LAUNCH COUNTDOWN BLUR OVERLAY
+       ===================================================================== */
+    body.launch-locked {
+      overflow: hidden !important;
+      height: 100vh !important;
+    }
+
+    body.launch-locked > *:not(#launchCountdownOverlay) {
+      filter: blur(14px) !important;
+      -webkit-filter: blur(14px) !important;
+      pointer-events: none !important;
+      user-select: none !important;
+    }
+
+    .launch-countdown-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      background: rgba(15, 23, 42, 0.62);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-sizing: border-box;
+    }
+
+    .launch-countdown-overlay.active {
+      display: flex;
+    }
+
+    .launch-countdown-card {
+      max-width: 660px;
+      width: 100%;
+      background: rgba(255, 255, 255, 0.96);
+      border: 2px solid rgba(217, 249, 66, 0.85);
+      border-radius: 32px;
+      padding: 2.75rem 2.25rem;
+      text-align: center;
+      box-shadow: 0 28px 80px rgba(15, 23, 42, 0.45), 0 0 0 8px rgba(217, 249, 66, 0.15);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .launch-badge-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #0f172a;
+      color: #d9f942;
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.45rem 1.1rem;
+      border-radius: 999px;
+      margin-bottom: 1.25rem;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.2);
+    }
+
+    .launch-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #d9f942;
+      box-shadow: 0 0 10px #d9f942;
+      animation: launchPulse 1.4s infinite ease-in-out;
+    }
+
+    @keyframes launchPulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.45); opacity: 0.55; }
+    }
+
+    .launch-brand-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.65rem;
+      margin-bottom: 0.85rem;
+    }
+
+    .launch-brand-row img {
+      height: 46px;
+      width: auto;
+      object-fit: contain;
+    }
+
+    .launch-brand-name {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.85rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .launch-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: clamp(1.6rem, 4.5vw, 2.35rem);
+      font-weight: 800;
+      color: #0f172a;
+      line-height: 1.2;
+      margin: 0 0 0.75rem 0;
+    }
+
+    .launch-subtitle {
+      font-size: 0.96rem;
+      color: #475569;
+      line-height: 1.6;
+      max-width: 540px;
+      margin: 0 auto 1.85rem;
+      font-weight: 500;
+    }
+
+    .launch-timer-grid {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.85rem;
+      margin-bottom: 1.85rem;
+      flex-wrap: wrap;
+    }
+
+    .launch-time-box {
+      background: #0f172a;
+      color: #ffffff;
+      border-radius: 22px;
+      min-width: 118px;
+      padding: 1.15rem 1rem;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.25);
+      border: 1.5px solid rgba(217, 249, 66, 0.35);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .launch-time-num {
+      font-family: 'JetBrains Mono', 'Outfit', monospace;
+      font-size: clamp(2rem, 5vw, 2.75rem);
+      font-weight: 800;
+      color: #d9f942;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }
+
+    .launch-time-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #94a3b8;
+      margin-top: 0.4rem;
+    }
+
+    .launch-time-sep {
+      font-family: 'Outfit', sans-serif;
+      font-size: 2rem;
+      font-weight: 800;
+      color: #0f172a;
+      margin-top: -0.75rem;
+    }
+
+    .launch-footer-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      padding: 0.6rem 1.2rem;
+      border-radius: 14px;
+      font-size: 0.84rem;
+      font-weight: 600;
+      color: #334155;
+    }
+
+    @media (max-width: 540px) {
+      .launch-countdown-card {
+        padding: 2rem 1.25rem;
+        border-radius: 24px;
+      }
+      .launch-time-box {
+        min-width: 82px;
+        padding: 0.85rem 0.65rem;
+      }
+      .launch-time-sep {
+        font-size: 1.35rem;
+      }
     }
 
     /* Crawler options row underneath capsule */
@@ -3110,6 +3317,47 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </style>
 </head>
 <body>
+  <!-- 8:15 PM Today Official Launch Countdown Overlay -->
+  <div id="launchCountdownOverlay" class="launch-countdown-overlay" aria-live="polite">
+    <div class="launch-countdown-card">
+      <div class="launch-badge-pill">
+        <span class="launch-pulse-dot"></span>
+        <span>Official Launch Today at 8:15 PM</span>
+      </div>
+      <div class="launch-brand-row">
+        <img src="/logo.png" alt="RizeMetrics Logo" />
+        <div class="launch-brand-name">
+          <span style="color: #ee591e;">Rize</span><span style="color: #2a7c37;">Metrics</span>
+        </div>
+      </div>
+      <h2 class="launch-title">We Are Launching Tonight at 8:15 PM!</h2>
+      <p class="launch-subtitle">
+        Get ready for unlimited Domain Authority (DA), Page Authority (PA), Bulk URL CSV Analysis &amp; 27-Signal Spam Score Intelligence. The platform unlocks automatically when the timer hits zero.
+      </p>
+      <div class="launch-timer-grid">
+        <div class="launch-time-box">
+          <span class="launch-time-num" id="cdHours">00</span>
+          <span class="launch-time-label">Hours</span>
+        </div>
+        <span class="launch-time-sep">:</span>
+        <div class="launch-time-box">
+          <span class="launch-time-num" id="cdMinutes">00</span>
+          <span class="launch-time-label">Minutes</span>
+        </div>
+        <span class="launch-time-sep">:</span>
+        <div class="launch-time-box">
+          <span class="launch-time-num" id="cdSeconds">00</span>
+          <span class="launch-time-label">Seconds</span>
+        </div>
+      </div>
+      <div class="launch-footer-note">
+        <svg width="16" height="16" fill="none" stroke="#16a34a" stroke-width="2.4" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <span>Live Real-Time Countdown to <strong>8:15 PM IST</strong></span>
+      </div>
+    </div>
+  </div>
 
   <!-- Floating Navigation Bar with Image 2 Signature Capsule + RW Logo -->
   <header class="nav-container">
@@ -4085,6 +4333,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       'address', 'host', 'hostname', 'da', 'pa', 'spam', 'score'
     ]);
 
+    const VALID_URL_TOKEN_REGEX = /^(?:https?:\/\/)?(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24}(?:[:/?#].*)?$/;
+
     function parseBulkUrlTokens(rawText) {
       if (!rawText || typeof rawText !== 'string') return [];
       const parts = rawText.split(/[\r\n,;|\t\s]+/);
@@ -4094,6 +4344,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         if (!cleaned) continue;
         if (BULK_STOPWORDS.has(cleaned.toLowerCase())) continue;
         if (cleaned.indexOf('.') === -1 || cleaned.length < 4) continue;
+        // Ignore numeric CSV metric cells like "567.3K", "14.2%", "2024.1"
+        if (!VALID_URL_TOKEN_REGEX.test(cleaned)) continue;
         tokens.push(cleaned);
       }
       return tokens;
@@ -4104,6 +4356,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const rawInput = document.getElementById('urlInput').value.trim();
       if (!rawInput) {
         document.getElementById('urlInput').focus();
+        return;
+      }
+      // If user clicked Analyze Authority right after a CSV upload summary was set, re-run those tokens
+      if (window._pendingCsvTokens && window._pendingCsvTokens.length > 0 && rawInput === window._pendingCsvLabel) {
+        executeBulkCheck(window._pendingCsvTokens);
         return;
       }
       const tokens = parseBulkUrlTokens(rawInput);
@@ -4133,7 +4390,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         }
         const inputEl = document.getElementById('urlInput');
         if (inputEl) {
-          inputEl.value = tokens.slice(0, 5).join(', ') + (tokens.length > 5 ? ` (+${tokens.length - 5} more)` : '');
+          const cleanLabel = tokens.length === 1
+            ? tokens[0]
+            : `${file.name} (${tokens.length} URLs loaded)`;
+          window._pendingCsvTokens = tokens;
+          window._pendingCsvLabel = cleanLabel;
+          inputEl.value = cleanLabel;
         }
         executeBulkCheck(tokens);
       };
@@ -4649,8 +4911,80 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    function initLaunchCountdownGate() {
+      const overlay = document.getElementById('launchCountdownOverlay');
+      if (!overlay) return;
+
+      // Launch target: Today at 8:15 PM (20:15:00) IST (UTC+05:30)
+      const LAUNCH_HOUR = 20;
+      const LAUNCH_MINUTE = 15;
+      const LAUNCH_SECOND = 0;
+      const ALLOWED_LAUNCH_DATES = new Set(['__SERVER_LAUNCH_DATE_IST__', '2026-11-27']);
+
+      function getRemainingLaunchMs() {
+        const now = new Date();
+        // Convert current UTC epoch to IST (UTC + 5h 30m)
+        const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
+        const istNow = new Date(now.getTime() + istOffsetMs);
+
+        const yyyy = istNow.getUTCFullYear();
+        const mm = String(istNow.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(istNow.getUTCDate()).padStart(2, '0');
+        const todayIstStr = `${yyyy}-${mm}-${dd}`;
+
+        if (!ALLOWED_LAUNCH_DATES.has(todayIstStr)) {
+          return 0;
+        }
+
+        const curHours = istNow.getUTCHours();
+        const curMins = istNow.getUTCMinutes();
+        const curSecs = istNow.getUTCSeconds();
+        const curMillis = istNow.getUTCMilliseconds();
+
+        const elapsedTodayMs = ((curHours * 3600) + (curMins * 60) + curSecs) * 1000 + curMillis;
+        const targetTodayMs = ((LAUNCH_HOUR * 3600) + (LAUNCH_MINUTE * 60) + LAUNCH_SECOND) * 1000;
+        return targetTodayMs - elapsedTodayMs;
+      }
+
+      function updateCountdownDisplay() {
+        const remMs = getRemainingLaunchMs();
+        if (remMs <= 0) {
+          overlay.classList.remove('active');
+          document.body.classList.remove('launch-locked');
+          if (window._launchCountdownTimer) {
+            clearInterval(window._launchCountdownTimer);
+            window._launchCountdownTimer = null;
+          }
+          return;
+        }
+
+        if (!overlay.classList.contains('active')) {
+          overlay.classList.add('active');
+          document.body.classList.add('launch-locked');
+        }
+
+        const totalSeconds = Math.ceil(remMs / 1000);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        safeSetText('cdHours', String(hours).padStart(2, '0'));
+        safeSetText('cdMinutes', String(minutes).padStart(2, '0'));
+        safeSetText('cdSeconds', String(seconds).padStart(2, '0'));
+      }
+
+      updateCountdownDisplay();
+      if (getRemainingLaunchMs() > 0) {
+        window._launchCountdownTimer = setInterval(updateCountdownDisplay, 250);
+      }
+    }
+
+    // Run launch countdown gate immediately so there is zero unblurred flash before 8:15 PM
+    initLaunchCountdownGate();
+
     // Load history on startup; search bar is empty by default until user enters a link
     window.addEventListener('DOMContentLoaded', () => {
+      initLaunchCountdownGate();
       loadHistory();
       const input = document.getElementById('urlInput');
       const val = input ? input.value.trim() : '';
@@ -4661,7 +4995,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </script>
 </body>
 </html>
-"""
+""".replace("__SERVER_LAUNCH_DATE_IST__", SERVER_LAUNCH_DATE_IST)
 
 
 # ==============================================================================
