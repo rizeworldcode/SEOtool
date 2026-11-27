@@ -36,12 +36,16 @@ from app.authority.ondemand import (
     OnDemandAuthorityAnalyzer,
     OnDemandAuthorityReport,
     normalize_user_target,
+    warmup_authority_datasets_async,
 )
 from app.database.mongo_store import (
     canonicalize_unique_url_key,
     save_bulk_urls_to_mongodb_async,
 )
 from app.web.pages import get_footer_page_html, is_footer_page
+
+# Trigger background dataset warmup on server module load so first request is instant
+warmup_authority_datasets_async("./data/linkpilot.db")
 
 
 # ==============================================================================
@@ -174,6 +178,8 @@ def evaluate_bulk_urls(
         analyzer = OnDemandAuthorityAnalyzer(
             db_path=db_path,
             max_internal_pages=1,
+            http_timeout=3.0,
+            archive_timeout=2.0,
             enable_live_crawl=enable_live_crawl,
             enable_archive_lookup=enable_archive_lookup,
         )
@@ -195,7 +201,7 @@ def evaluate_bulk_urls(
             "execution_time_ms": round(float(rep.execution_time_ms or 0.0), 1),
         }
 
-    max_workers = min(4, max(1, len(capped_targets)))
+    max_workers = min(10, max(1, len(capped_targets)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         evaluated_list = list(pool.map(_eval_single, capped_targets))
 
@@ -3203,15 +3209,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <span>Live Mini-Crawler</span>
           </label>
           <label class="hero-opt-badge" title="Query Internet Archive Wayback CDX">
-            <input type="checkbox" id="optArchive" checked style="accent-color: #0f172a;" />
+            <input type="checkbox" id="optArchive" style="accent-color: #0f172a;" />
             <span>Wayback CDX History</span>
           </label>
           <label class="hero-opt-badge">
             <span>Max Internal Pages:</span>
             <select id="optMaxPages" class="hero-select">
-              <option value="1">1 page (Fastest)</option>
+              <option value="1" selected>1 page (Fastest)</option>
               <option value="3">3 pages</option>
-              <option value="5" selected>5 pages (Balanced)</option>
+              <option value="5">5 pages (Balanced)</option>
               <option value="10">10 pages (Deep)</option>
             </select>
           </label>

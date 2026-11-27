@@ -1043,12 +1043,20 @@ def _load_disk_signal_cache() -> None:
 
 
 def _save_disk_signal_cache() -> None:
+    def _writer(snapshot: Dict[str, Any]) -> None:
+        try:
+            os.makedirs(os.path.dirname(_CACHE_FILE_PATH), exist_ok=True)
+            with open(_CACHE_FILE_PATH, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f)
+        except Exception as e:
+            logger.debug(f"Could not save on-demand signal cache: {e}")
+
     try:
-        os.makedirs(os.path.dirname(_CACHE_FILE_PATH), exist_ok=True)
-        with open(_CACHE_FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(_DOMAIN_SIGNAL_CACHE, f)
+        snap = dict(_DOMAIN_SIGNAL_CACHE)
+        t = threading.Thread(target=_writer, args=(snap,), daemon=True)
+        t.start()
     except Exception as e:
-        logger.debug(f"Could not save on-demand signal cache: {e}")
+        logger.debug(f"Could not spawn signal cache writer: {e}")
 
 
 def merge_and_get_cached_signals(
@@ -1435,6 +1443,219 @@ def is_utility_url(url: str) -> bool:
 # ZERO-API-KEY MOZ-EXACT ON-DEMAND ANALYZER
 # ==============================================================================
 
+# In-memory read-only SQLite knowledge graph index cache (keyed by abs_db_path)
+_LOCAL_DB_CACHE_LOCK = threading.Lock()
+_LOCAL_DB_INDEX_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+
+def _get_or_build_local_db_index(abs_path: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Build an in-memory index of the immutable read-only SQLite knowledge graph once
+    per process so every URL check performs an O(1) dictionary lookup (<0.05ms)
+    instead of scanning and normalizing thousands of SQLite rows on each check.
+    """
+    with _LOCAL_DB_CACHE_LOCK:
+        cached_idx = _LOCAL_DB_INDEX_CACHE.get(abs_path)
+        if cached_idx is not None:
+            return cached_idx
+
+        domain_index: Dict[str, Dict[str, Any]] = {}
+
+        def _ensure_dom(dom: str) -> Dict[str, Any]:
+            entry = domain_index.get(dom)
+            if entry is None:
+                entry = {
+                    "pages": [],
+                    "occurrences": [],
+                    "snapshots_count": 0,
+                    "earliest_year": None,
+                    "rdap_created_year": None,
+                }
+                domain_index[dom] = entry
+            return entry
+
+        uri = f"file:{abs_path}?mode=ro"
+        conn = None
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = {r["name"] for r in cur.fetchall()}
+            if "pages" in tables and "link_occurrences" in tables:
+                has_meta = "webpage_metadata" in tables
+                if has_meta:
+                    cur.execute("""
+                        SELECT
+                            p.id, p.raw_url, p.normalized_url, p.http_status, p.canonical_url,
+                            wm.title, wm.meta_description, wm.h1_headings, wm.language
+                        FROM pages p
+                        LEFT JOIN webpage_metadata wm ON wm.page_id = p.id
+                        ORDER BY p.id ASC
+                    """)
+                else:
+                    cur.execute("""
+                        SELECT
+                            id, raw_url, normalized_url, http_status, canonical_url,
+                            NULL as title, NULL as meta_description, NULL as h1_headings, NULL as language
+                        FROM pages
+                        ORDER BY id ASC
+                    """)
+
+                page_map: Dict[int, Dict[str, Any]] = {}
+                for row in cur.fetchall():
+                    pid = row["id"]
+                    raw_u = row["raw_url"] or ""
+                    norm_u = row["normalized_url"] or raw_u
+                    norm_res = CanonicalURLNormalizer.normalize_url(norm_u)
+                    if not norm_res.is_valid_web_url:
+                        continue
+                    p_dom = norm_res.domain.site_boundary
+                    if p_dom in SYNTHETIC_MOCK_DOMAINS:
+                        continue
+
+                    p_info = {
+                        "id": pid,
+                        "raw_url": raw_u,
+                        "normalized_url": norm_res.normalized_url,
+                        "key": norm_res.observed_page_key or norm_res.normalized_url,
+                        "domain": p_dom,
+                        "http_status": row["http_status"] or 200,
+                        "title": row["title"],
+                        "meta_description": row["meta_description"],
+                        "canonical_url": row["canonical_url"],
+                        "language": row["language"],
+                    }
+                    page_map[pid] = p_info
+                    _ensure_dom(p_dom)["pages"].append(p_info)
+
+                cur.execute("""
+                    SELECT
+                        lo.raw_target_url,
+                        lo.normalized_target_url,
+                        lo.anchor_text,
+                        lo.rel_attributes,
+                        lo.dom_context,
+                        pl.source_page_id,
+                        pl.target_page_id
+                    FROM link_occurrences lo
+                    LEFT JOIN page_links pl ON lo.page_link_id = pl.id
+                    ORDER BY lo.id ASC
+                """)
+                for row in cur.fetchall():
+                    src_pid = row["source_page_id"]
+                    if not src_pid or src_pid not in page_map:
+                        continue
+                    src_page = page_map[src_pid]
+                    raw_tgt = row["raw_target_url"] or row["normalized_target_url"] or ""
+                    if not raw_tgt:
+                        continue
+                    tgt_res = CanonicalURLNormalizer.normalize_url(raw_tgt, base_url=src_page["normalized_url"])
+                    if not tgt_res.is_valid_web_url:
+                        continue
+                    tgt_dom = tgt_res.domain.site_boundary
+                    if tgt_dom in SYNTHETIC_MOCK_DOMAINS:
+                        continue
+
+                    occ_item = {
+                        "source_url": src_page["normalized_url"],
+                        "source_key": src_page["key"],
+                        "source_domain": src_page["domain"],
+                        "target_url": tgt_res.normalized_url,
+                        "target_key": tgt_res.observed_page_key or tgt_res.normalized_url,
+                        "target_domain": tgt_dom,
+                        "raw_href": raw_tgt,
+                        "anchor_text": row["anchor_text"],
+                        "rel_attributes": row["rel_attributes"],
+                        "dom_context": row["dom_context"] or "body",
+                        "is_internal": (src_page["domain"] == tgt_dom),
+                        "provenance": "local_db",
+                    }
+                    _ensure_dom(src_page["domain"])["occurrences"].append(occ_item)
+                    if tgt_dom != src_page["domain"]:
+                        _ensure_dom(tgt_dom)["occurrences"].append(occ_item)
+
+                if "historical_snapshots" in tables and "domains" in tables:
+                    cur.execute("""
+                        SELECT d.domain_name, hs.timestamp
+                        FROM historical_snapshots hs
+                        JOIN domains d ON hs.domain_id = d.id
+                    """)
+                    snaps_by_dom: Dict[str, List[int]] = {}
+                    counts_by_dom: Dict[str, int] = {}
+                    for s in cur.fetchall():
+                        d_name = str(s["domain_name"] or "").strip()
+                        if not d_name:
+                            continue
+                        counts_by_dom[d_name] = counts_by_dom.get(d_name, 0) + 1
+                        ts = str(s["timestamp"] or "")
+                        if len(ts) >= 4 and ts[:4].isdigit():
+                            snaps_by_dom.setdefault(d_name, []).append(int(ts[:4]))
+                    for d_name, cnt in counts_by_dom.items():
+                        entry = _ensure_dom(d_name)
+                        entry["snapshots_count"] = cnt
+                        yrs = snaps_by_dom.get(d_name)
+                        if yrs:
+                            entry["earliest_year"] = min(yrs)
+
+                if "domain_registration_data" in tables and "domains" in tables:
+                    cur.execute("""
+                        SELECT d.domain_name, r.created_date
+                        FROM domain_registration_data r
+                        JOIN domains d ON r.domain_id = d.id
+                    """)
+                    for reg_row in cur.fetchall():
+                        d_name = str(reg_row["domain_name"] or "").strip()
+                        c_str = str(reg_row["created_date"] or "")
+                        if d_name and len(c_str) >= 4 and c_str[:4].isdigit():
+                            _ensure_dom(d_name)["rdap_created_year"] = int(c_str[:4])
+
+            _LOCAL_DB_INDEX_CACHE[abs_path] = domain_index
+        except Exception as e:
+            logger.debug(f"Local DB read-only index build skipped/failed: {e}")
+        finally:
+            if conn is not None:
+                conn.close()
+
+        return domain_index
+
+
+_WARMUP_STARTED = False
+
+
+def warmup_authority_datasets_async(db_path: str = "./data/linkpilot.db") -> None:
+    """
+    Preload Tranco 1M, Majestic Million, Moz Top-500, Spam Blocklists, Signal Cache,
+    and the read-only SQLite knowledge graph index in a background daemon thread
+    so the very first user URL check has zero cold-start CSV parsing delay.
+    """
+    global _WARMUP_STARTED
+    if _WARMUP_STARTED:
+        return
+    _WARMUP_STARTED = True
+
+    def _run_warmup() -> None:
+        try:
+            lookup_moz_top500("google.com")
+            lookup_majestic_metrics("google.com")
+            lookup_tranco_rank("google.com")
+            lookup_spam_blocklist("google.com")
+            with _CACHE_LOCK:
+                if not _DOMAIN_SIGNAL_CACHE:
+                    _load_disk_signal_cache()
+            if db_path and os.path.exists(db_path):
+                _get_or_build_local_db_index(os.path.abspath(db_path))
+        except Exception as e:
+            logger.debug(f"Background dataset warmup skipped: {e}")
+
+    try:
+        t = threading.Thread(target=_run_warmup, daemon=True)
+        t.start()
+    except Exception:
+        pass
+
+
 class OnDemandAuthorityAnalyzer:
     """
     100% Autonomous, Zero-API-Key On-Demand DA & PA Analyzer.
@@ -1451,8 +1672,8 @@ class OnDemandAuthorityAnalyzer:
         self,
         db_path: str = "./data/linkpilot.db",
         max_internal_pages: int = 5,
-        http_timeout: float = 8.0,
-        archive_timeout: float = 6.0,
+        http_timeout: float = 3.8,
+        archive_timeout: float = 2.5,
         enable_live_crawl: bool = True,
         enable_archive_lookup: bool = True,
         http_client: Optional[httpx.Client] = None,
@@ -1493,7 +1714,7 @@ class OnDemandAuthorityAnalyzer:
     def _load_local_db_signals(
         self, site_boundary: str
     ) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
+        default_result: Dict[str, Any] = {
             "pages": [],
             "occurrences": [],
             "snapshots_count": 0,
@@ -1501,149 +1722,20 @@ class OnDemandAuthorityAnalyzer:
             "rdap_created_year": None,
         }
         if not self.db_path or not os.path.exists(self.db_path):
-            return result
+            return default_result
 
         abs_path = os.path.abspath(self.db_path)
-        uri = f"file:{abs_path}?mode=ro"
-        conn = None
-        try:
-            conn = sqlite3.connect(uri, uri=True)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = {r["name"] for r in cur.fetchall()}
-            if "pages" not in tables or "link_occurrences" not in tables:
-                return result
-
-            has_meta = "webpage_metadata" in tables
-            if has_meta:
-                cur.execute("""
-                    SELECT
-                        p.id, p.raw_url, p.normalized_url, p.http_status, p.canonical_url,
-                        wm.title, wm.meta_description, wm.h1_headings, wm.language
-                    FROM pages p
-                    LEFT JOIN webpage_metadata wm ON wm.page_id = p.id
-                    ORDER BY p.id ASC
-                """)
-            else:
-                cur.execute("""
-                    SELECT
-                        id, raw_url, normalized_url, http_status, canonical_url,
-                        NULL as title, NULL as meta_description, NULL as h1_headings, NULL as language
-                    FROM pages
-                    ORDER BY id ASC
-                """)
-
-            page_map: Dict[int, Dict[str, Any]] = {}
-            for row in cur.fetchall():
-                pid = row["id"]
-                raw_u = row["raw_url"] or ""
-                norm_u = row["normalized_url"] or raw_u
-                norm_res = CanonicalURLNormalizer.normalize_url(norm_u)
-                if not norm_res.is_valid_web_url:
-                    continue
-                p_dom = norm_res.domain.site_boundary
-                if p_dom in SYNTHETIC_MOCK_DOMAINS:
-                    continue
-
-                p_info = {
-                    "id": pid,
-                    "raw_url": raw_u,
-                    "normalized_url": norm_res.normalized_url,
-                    "key": norm_res.observed_page_key or norm_res.normalized_url,
-                    "domain": p_dom,
-                    "http_status": row["http_status"] or 200,
-                    "title": row["title"],
-                    "meta_description": row["meta_description"],
-                    "canonical_url": row["canonical_url"],
-                    "language": row["language"],
-                }
-                page_map[pid] = p_info
-                if p_dom == site_boundary:
-                    result["pages"].append(p_info)
-
-            cur.execute("""
-                SELECT
-                    lo.raw_target_url,
-                    lo.normalized_target_url,
-                    lo.anchor_text,
-                    lo.rel_attributes,
-                    lo.dom_context,
-                    pl.source_page_id,
-                    pl.target_page_id
-                FROM link_occurrences lo
-                LEFT JOIN page_links pl ON lo.page_link_id = pl.id
-                ORDER BY lo.id ASC
-            """)
-            for row in cur.fetchall():
-                src_pid = row["source_page_id"]
-                if not src_pid or src_pid not in page_map:
-                    continue
-                src_page = page_map[src_pid]
-                raw_tgt = row["raw_target_url"] or row["normalized_target_url"] or ""
-                if not raw_tgt:
-                    continue
-                tgt_res = CanonicalURLNormalizer.normalize_url(raw_tgt, base_url=src_page["normalized_url"])
-                if not tgt_res.is_valid_web_url:
-                    continue
-                tgt_dom = tgt_res.domain.site_boundary
-                if tgt_dom in SYNTHETIC_MOCK_DOMAINS:
-                    continue
-
-                if src_page["domain"] == site_boundary or tgt_dom == site_boundary:
-                    result["occurrences"].append({
-                        "source_url": src_page["normalized_url"],
-                        "source_key": src_page["key"],
-                        "source_domain": src_page["domain"],
-                        "target_url": tgt_res.normalized_url,
-                        "target_key": tgt_res.observed_page_key or tgt_res.normalized_url,
-                        "target_domain": tgt_dom,
-                        "raw_href": raw_tgt,
-                        "anchor_text": row["anchor_text"],
-                        "rel_attributes": row["rel_attributes"],
-                        "dom_context": row["dom_context"] or "body",
-                        "is_internal": (src_page["domain"] == tgt_dom),
-                        "provenance": "local_db",
-                    })
-
-            if "historical_snapshots" in tables and "domains" in tables:
-                cur.execute("""
-                    SELECT hs.timestamp
-                    FROM historical_snapshots hs
-                    JOIN domains d ON hs.domain_id = d.id
-                    WHERE d.domain_name = ?
-                """, (site_boundary,))
-                snaps = cur.fetchall()
-                result["snapshots_count"] = len(snaps)
-                years = []
-                for s in snaps:
-                    ts = str(s["timestamp"] or "")
-                    if len(ts) >= 4 and ts[:4].isdigit():
-                        years.append(int(ts[:4]))
-                if years:
-                    result["earliest_year"] = min(years)
-
-            if "domain_registration_data" in tables and "domains" in tables:
-                cur.execute("""
-                    SELECT r.created_date
-                    FROM domain_registration_data r
-                    JOIN domains d ON r.domain_id = d.id
-                    WHERE d.domain_name = ?
-                """, (site_boundary,))
-                reg_row = cur.fetchone()
-                if reg_row and reg_row["created_date"]:
-                    c_str = str(reg_row["created_date"])
-                    if len(c_str) >= 4 and c_str[:4].isdigit():
-                        result["rdap_created_year"] = int(c_str[:4])
-
-        except Exception as e:
-            logger.debug(f"Local DB read-only lookup skipped/failed for {site_boundary}: {e}")
-        finally:
-            if conn is not None:
-                conn.close()
-
-        return result
+        idx = _get_or_build_local_db_index(abs_path)
+        found = idx.get(site_boundary)
+        if not found:
+            return default_result
+        return {
+            "pages": list(found["pages"]),
+            "occurrences": list(found["occurrences"]),
+            "snapshots_count": found["snapshots_count"],
+            "earliest_year": found["earliest_year"],
+            "rdap_created_year": found["rdap_created_year"],
+        }
 
     # --------------------------------------------------------------------------
     # STEP 2: RESILIENT LIVE HTTP CRAWL & ON-PAGE SPAM SIGNAL EXTRACTION
@@ -1826,16 +1918,32 @@ class OnDemandAuthorityAnalyzer:
         candidate_internal_urls: List[Tuple[int, str]] = []
         seen_fetched: Set[str] = set()
 
-        for s_url in seed_urls:
-            if s_url in seen_fetched:
-                continue
-            seen_fetched.add(s_url)
+        def _fetch_seed_with_fast_www_fallback(s_url: str) -> Tuple[str, Optional[Tuple[CrawledPageSummary, List[ExtractedLinkOccurrence], str]]]:
+            t_seed = time.perf_counter()
             fetched = self._fetch_single_page(s_url, site_boundary)
-            if fetched is None and s_url.startswith("https://") and not (urlsplit(s_url).hostname or "").startswith("www."):
+            elapsed_seed = time.perf_counter() - t_seed
+            # Only attempt www. fallback if bare domain failed quickly (e.g. DNS/connection refused), not after a full timeout
+            if (
+                fetched is None
+                and elapsed_seed < (self.http_timeout * 0.85)
+                and s_url.startswith("https://")
+                and not (urlsplit(s_url).hostname or "").startswith("www.")
+            ):
                 parsed = urlsplit(s_url)
                 www_url = f"{parsed.scheme}://www.{parsed.netloc}{parsed.path or '/'}"
                 fetched = self._fetch_single_page(www_url, site_boundary)
+            return s_url, fetched
 
+        seed_results: List[Tuple[str, Optional[Tuple[CrawledPageSummary, List[ExtractedLinkOccurrence], str]]]] = []
+        if len(seed_urls) > 1 and self._custom_client is None:
+            with ThreadPoolExecutor(max_workers=len(seed_urls)) as seed_pool:
+                seed_results = list(seed_pool.map(_fetch_seed_with_fast_www_fallback, seed_urls))
+        else:
+            for s_url in seed_urls:
+                seed_results.append(_fetch_seed_with_fast_www_fallback(s_url))
+
+        for s_url, fetched in seed_results:
+            seen_fetched.add(s_url)
             if fetched is not None:
                 summary, links, final_norm_url = fetched
                 seen_fetched.add(final_norm_url)
@@ -1977,70 +2085,94 @@ class OnDemandAuthorityAnalyzer:
         if not self.enable_archive_lookup:
             return telemetry
 
+        # Fast-path when using real network client: if archive telemetry is already cached
+        # in _DOMAIN_SIGNAL_CACHE for this domain (and target_url if subpage), skip slow Wayback HTTP calls
+        if self._custom_client is None:
+            with _CACHE_LOCK:
+                if not _DOMAIN_SIGNAL_CACHE:
+                    _load_disk_signal_cache()
+                cached_dom = _DOMAIN_SIGNAL_CACHE.get(site_boundary, {})
+                prev_arch = cached_dom.get("archive", {})
+                if prev_arch.get("source_active"):
+                    p_snaps_map = prev_arch.get("page_snapshots_map", {})
+                    if target_url == root_url or target_url in p_snaps_map:
+                        return {
+                            "archived_urls": list(prev_arch.get("archived_urls", [])),
+                            "snapshots_count": int(prev_arch.get("snapshots_count", 0)),
+                            "cdx_num_pages": int(prev_arch.get("cdx_num_pages", 0)),
+                            "cc_num_pages": int(prev_arch.get("cc_num_pages", 0)),
+                            "target_page_snapshots": int(p_snaps_map.get(target_url, prev_arch.get("snapshots_count", 0))),
+                            "target_page_cdx_blocks": int(prev_arch.get("page_blocks_map", {}).get(target_url, prev_arch.get("cdx_num_pages", 0))),
+                            "earliest_year": prev_arch.get("earliest_year"),
+                            "source_active": True,
+                            "cc_active": bool(prev_arch.get("cc_active")),
+                        }
+
         client = self._create_http_client(timeout=self.archive_timeout)
         cdx_url = "https://web.archive.org/cdx/search/cdx"
         try:
-            # 1. Domain-Level Exact-Host CDX Block Scale
-            try:
-                resp_pages = client.get(
-                    cdx_url,
-                    params={"url": site_boundary, "showNumPages": "true"},
-                )
-                if resp_pages.status_code == 200:
-                    txt = resp_pages.text.strip()
-                    if txt.isdigit():
-                        telemetry["cdx_num_pages"] = int(txt)
-                        telemetry["source_active"] = True
-            except Exception:
-                pass
+            def _fetch_cdx_blocks() -> None:
+                try:
+                    resp_pages = client.get(
+                        cdx_url,
+                        params={"url": site_boundary, "showNumPages": "true"},
+                    )
+                    if resp_pages.status_code == 200:
+                        txt = resp_pages.text.strip()
+                        if txt.isdigit():
+                            telemetry["cdx_num_pages"] = int(txt)
+                            telemetry["source_active"] = True
+                except Exception:
+                    pass
 
-            # 2. Domain-Level Monthly Snapshot History (collapse=timestamp:6, limit=80)
-            try:
-                params = {
-                    "url": site_boundary,
-                    "output": "json",
-                    "fl": "timestamp,original,mimetype,statuscode",
-                    "filter": "statuscode:200",
-                    "collapse": "timestamp:6",
-                    "limit": "80",
-                }
-                resp = client.get(cdx_url, params=params)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data and len(data) > 1:
-                        telemetry["source_active"] = True
-                        years: List[int] = []
-                        discovered_urls: List[str] = []
-                        for row in data[1:]:
-                            if len(row) < 4:
-                                continue
-                            ts, orig, mime, _ = str(row[0]), str(row[1]), str(row[2]), str(row[3])
-                            if len(ts) >= 4 and ts[:4].isdigit():
-                                years.append(int(ts[:4]))
-                            if "html" in mime.lower() or mime == "unk":
-                                n_res = CanonicalURLNormalizer.normalize_url(orig)
-                                if (
-                                    n_res.is_valid_web_url
-                                    and n_res.domain.site_boundary == site_boundary
-                                    and is_crawlable_html_url(n_res.normalized_url)
-                                ):
-                                    if n_res.normalized_url not in discovered_urls:
-                                        discovered_urls.append(n_res.normalized_url)
+            def _fetch_cdx_history() -> None:
+                try:
+                    params = {
+                        "url": site_boundary,
+                        "output": "json",
+                        "fl": "timestamp,original,mimetype,statuscode",
+                        "filter": "statuscode:200",
+                        "collapse": "timestamp:6",
+                        "limit": "80",
+                    }
+                    resp = client.get(cdx_url, params=params)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data and len(data) > 1:
+                            telemetry["source_active"] = True
+                            years: List[int] = []
+                            discovered_urls: List[str] = []
+                            for row in data[1:]:
+                                if len(row) < 4:
+                                    continue
+                                ts, orig, mime, _ = str(row[0]), str(row[1]), str(row[2]), str(row[3])
+                                if len(ts) >= 4 and ts[:4].isdigit():
+                                    years.append(int(ts[:4]))
+                                if "html" in mime.lower() or mime == "unk":
+                                    n_res = CanonicalURLNormalizer.normalize_url(orig)
+                                    if (
+                                        n_res.is_valid_web_url
+                                        and n_res.domain.site_boundary == site_boundary
+                                        and is_crawlable_html_url(n_res.normalized_url)
+                                    ):
+                                        if n_res.normalized_url not in discovered_urls:
+                                            discovered_urls.append(n_res.normalized_url)
 
-                        telemetry["archived_urls"] = discovered_urls
-                        telemetry["snapshots_count"] = max(telemetry["snapshots_count"], len(data) - 1)
-                        if years:
-                            telemetry["earliest_year"] = min(years)
-            except Exception:
-                pass
+                            telemetry["archived_urls"] = discovered_urls
+                            telemetry["snapshots_count"] = max(telemetry["snapshots_count"], len(data) - 1)
+                            if years:
+                                telemetry["earliest_year"] = min(years)
+                except Exception:
+                    pass
 
-            # 3. Page-Specific Wayback CDX Lookup (when inspecting a specific subpage URL!)
-            if target_url != root_url:
+            def _fetch_target_subpage_cdx() -> None:
+                if target_url == root_url:
+                    return
                 try:
                     resp_p_blocks = client.get(
                         cdx_url,
                         params={"url": target_url, "showNumPages": "true"},
-                        timeout=3.0,
+                        timeout=2.2,
                     )
                     if resp_p_blocks.status_code == 200 and resp_p_blocks.text.strip().isdigit():
                         telemetry["target_page_cdx_blocks"] = int(resp_p_blocks.text.strip())
@@ -2055,7 +2187,7 @@ class OnDemandAuthorityAnalyzer:
                             "collapse": "timestamp:6",
                             "limit": "60",
                         },
-                        timeout=3.5,
+                        timeout=2.5,
                     )
                     if resp_p_snaps.status_code == 200:
                         p_data = resp_p_snaps.json()
@@ -2064,12 +2196,53 @@ class OnDemandAuthorityAnalyzer:
                             telemetry["source_active"] = True
                 except Exception:
                     pass
+
+            def _fetch_common_crawl() -> None:
+                if self._custom_client is not None:
+                    return
+                try:
+                    cc_url = "https://index.commoncrawl.org/CC-MAIN-2024-33-index"
+                    resp_cc = client.get(
+                        cc_url,
+                        params={"url": site_boundary, "showNumPages": "true"},
+                        timeout=2.0,
+                    )
+                    if resp_cc.status_code == 200:
+                        cc_txt = resp_cc.text.strip()
+                        if cc_txt.isdigit():
+                            telemetry["cc_num_pages"] = int(cc_txt)
+                            telemetry["cc_active"] = True
+                        elif "blocks" in cc_txt:
+                            cc_json = json.loads(cc_txt)
+                            telemetry["cc_num_pages"] = int(cc_json.get("blocks", 0))
+                            telemetry["cc_active"] = True
+                except Exception:
+                    pass
+
+            if self._custom_client is None:
+                with ThreadPoolExecutor(max_workers=4) as arch_pool:
+                    futs = [
+                        arch_pool.submit(_fetch_cdx_blocks),
+                        arch_pool.submit(_fetch_cdx_history),
+                        arch_pool.submit(_fetch_target_subpage_cdx),
+                        arch_pool.submit(_fetch_common_crawl),
+                    ]
+                    for f in futs:
+                        try:
+                            f.result()
+                        except Exception:
+                            pass
             else:
+                _fetch_cdx_blocks()
+                _fetch_cdx_history()
+                _fetch_target_subpage_cdx()
+
+            if target_url == root_url:
                 telemetry["target_page_snapshots"] = telemetry["snapshots_count"]
                 telemetry["target_page_cdx_blocks"] = telemetry["cdx_num_pages"]
 
-            # 4. Bounded Prefix URL Discovery for domain subpages
-            if len(telemetry["archived_urls"]) <= 2:
+            # 4. Bounded Prefix URL Discovery for domain subpages (only if custom client or no live crawl)
+            if len(telemetry["archived_urls"]) <= 2 and (self._custom_client is not None or not self.enable_live_crawl):
                 try:
                     resp_sub = client.get(
                         cdx_url,
@@ -2081,7 +2254,7 @@ class OnDemandAuthorityAnalyzer:
                             "collapse": "urlkey",
                             "limit": "25",
                         },
-                        timeout=3.0,
+                        timeout=2.2,
                     )
                     if resp_sub.status_code == 200:
                         data_sub = resp_sub.json()
@@ -2114,27 +2287,6 @@ class OnDemandAuthorityAnalyzer:
                 except Exception:
                     pass
 
-            # 5. Common Crawl Public CDX Index Check (Zero API Key)
-            if self._custom_client is None:
-                try:
-                    cc_url = "https://index.commoncrawl.org/CC-MAIN-2024-33-index"
-                    resp_cc = client.get(
-                        cc_url,
-                        params={"url": site_boundary, "showNumPages": "true"},
-                        timeout=3.0,
-                    )
-                    if resp_cc.status_code == 200:
-                        cc_txt = resp_cc.text.strip()
-                        if cc_txt.isdigit():
-                            telemetry["cc_num_pages"] = int(cc_txt)
-                            telemetry["cc_active"] = True
-                        elif "blocks" in cc_txt:
-                            cc_json = json.loads(cc_txt)
-                            telemetry["cc_num_pages"] = int(cc_json.get("blocks", 0))
-                            telemetry["cc_active"] = True
-                except Exception:
-                    pass
-
         except Exception as e:
             logger.debug(f"Archive query unavailable for {site_boundary}: {e}")
         finally:
@@ -2162,6 +2314,11 @@ class OnDemandAuthorityAnalyzer:
         if not self.enable_archive_lookup or self._custom_client is not None:
             return rdap_info
 
+        with _CACHE_LOCK:
+            cached_rdap = _DOMAIN_SIGNAL_CACHE.get(site_boundary, {}).get("rdap", {})
+            if cached_rdap.get("source_active"):
+                return dict(cached_rdap)
+
         try:
             from app.sources.rdap.bootstrap import RDAPBootstrapResolver
             resolver = RDAPBootstrapResolver()
@@ -2170,7 +2327,7 @@ class OnDemandAuthorityAnalyzer:
                 return rdap_info
 
             query_url = urljoin(base_ep, f"domain/{site_boundary}")
-            client = self._create_http_client(timeout=4.0)
+            client = self._create_http_client(timeout=2.2)
             try:
                 resp = client.get(
                     query_url,
@@ -2395,12 +2552,21 @@ class OnDemandAuthorityAnalyzer:
         parsed_target = urlsplit(target_url)
         hostname = (parsed_target.hostname or site_boundary).lower()
 
-        # Gather multi-source public telemetry (Zero API Keys) & merge into Monotonic Cache
+        # Gather multi-source public telemetry (Zero API Keys) concurrently & merge into Monotonic Cache
         try:
             local_data = self._load_local_db_signals(site_boundary)
-            raw_live_data = self._run_mini_crawler(target_url, root_url, site_boundary)
-            raw_archive_data = self._query_archive_telemetry(target_url, root_url, site_boundary)
-            raw_rdap_data = self._query_rdap_telemetry(site_boundary)
+            if self._custom_client is None and (self.enable_live_crawl or self.enable_archive_lookup):
+                with ThreadPoolExecutor(max_workers=3) as telemetry_pool:
+                    fut_live = telemetry_pool.submit(self._run_mini_crawler, target_url, root_url, site_boundary)
+                    fut_arch = telemetry_pool.submit(self._query_archive_telemetry, target_url, root_url, site_boundary)
+                    fut_rdap = telemetry_pool.submit(self._query_rdap_telemetry, site_boundary)
+                    raw_live_data = fut_live.result()
+                    raw_archive_data = fut_arch.result()
+                    raw_rdap_data = fut_rdap.result()
+            else:
+                raw_live_data = self._run_mini_crawler(target_url, root_url, site_boundary)
+                raw_archive_data = self._query_archive_telemetry(target_url, root_url, site_boundary)
+                raw_rdap_data = self._query_rdap_telemetry(site_boundary)
 
             if self.enable_live_crawl or self.enable_archive_lookup:
                 archive_data, rdap_data, live_data = merge_and_get_cached_signals(
