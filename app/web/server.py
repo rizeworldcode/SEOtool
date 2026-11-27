@@ -3320,10 +3320,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <!-- 8:15 PM Today Official Launch Countdown Overlay -->
   <div id="launchCountdownOverlay" class="launch-countdown-overlay" aria-live="polite">
     <div class="launch-countdown-card">
-      <div class="launch-badge-pill">
-        <span class="launch-pulse-dot"></span>
-        <span>Official Launch Today at 8:15 PM</span>
-      </div>
       <div class="launch-brand-row">
         <img src="/logo.png" alt="RizeMetrics Logo" />
         <div class="launch-brand-name">
@@ -3334,7 +3330,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <p class="launch-subtitle">
         Get ready for unlimited Domain Authority (DA), Page Authority (PA), Bulk URL CSV Analysis &amp; 27-Signal Spam Score Intelligence. The platform unlocks automatically when the timer hits zero.
       </p>
-      <div class="launch-timer-grid">
+      <div class="launch-timer-grid" style="margin-bottom: 0.25rem;">
         <div class="launch-time-box">
           <span class="launch-time-num" id="cdHours">00</span>
           <span class="launch-time-label">Hours</span>
@@ -3349,12 +3345,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <span class="launch-time-num" id="cdSeconds">00</span>
           <span class="launch-time-label">Seconds</span>
         </div>
-      </div>
-      <div class="launch-footer-note">
-        <svg width="16" height="16" fill="none" stroke="#16a34a" stroke-width="2.4" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-        </svg>
-        <span>Live Real-Time Countdown to <strong>8:15 PM IST</strong></span>
       </div>
     </div>
   </div>
