@@ -3527,7 +3527,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <span style="color: #ee591e;">Rize</span><span style="color: #2a7c37;">Metrics</span>
         </div>
       </div>
-      <h2 class="launch-title">We Are Launching Tonight at 9:00 PM!</h2>
+      <h2 class="launch-title">We Are Launching Tonight at 9:15 PM!</h2>
       <p class="launch-subtitle">
         Get ready for unlimited Domain Authority (DA), Page Authority (PA), Bulk URL CSV Analysis &amp; 27-Signal Spam Score Intelligence. The ribbon cuts automatically when the timer hits zero.
       </p>
@@ -5188,9 +5188,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const overlay = document.getElementById('launchCountdownOverlay');
       if (!overlay) return;
 
-      // Launch target: Today at 9:00 PM (21:00:00) IST (UTC+05:30)
+      // Launch target: Today at 9:15 PM (21:15:00) IST (UTC+05:30)
       const LAUNCH_HOUR = 21;
-      const LAUNCH_MINUTE = 0;
+      const LAUNCH_MINUTE = 15;
       const LAUNCH_SECOND = 0;
       const ALLOWED_LAUNCH_DATES = new Set(['__SERVER_LAUNCH_DATE_IST__', '2026-11-27']);
 
