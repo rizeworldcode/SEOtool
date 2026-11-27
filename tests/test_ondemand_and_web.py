@@ -461,6 +461,33 @@ def test_web_ui_and_rest_api_endpoints():
     assert hist["count"] >= 2
     assert hist["history"][0]["domain_name"] == "commoncrawl.org"
 
+    # 7. POST /api/bulk-check (Bulk URL DA/PA/Spam Score evaluation + duplicate URL deduplication)
+    bulk_req = json.dumps({
+        "urls": [
+            "https://www.zoniraz.com",
+            "zoniraz.com",  # Duplicate canonical URL — must be deduplicated
+            "https://commoncrawl.org",
+            "https://www.zoniraz.com/",  # Another duplicate
+        ],
+        "enable_live_crawl": False,
+        "enable_archive_lookup": False,
+    })
+    code, _, bulk_res = handle_web_request("POST", "/api/bulk-check", raw_body=bulk_req, db_path="./data/linkpilot.db")
+    assert code == 200
+    assert bulk_res["status"] == "COMPLETED"
+    assert bulk_res["total_submitted"] == 4
+    assert bulk_res["unique_evaluated"] == 2
+    assert bulk_res["duplicates_skipped"] == 2
+    assert len(bulk_res["results"]) == 2
+    first_item = bulk_res["results"][0]
+    second_item = bulk_res["results"][1]
+    assert first_item["domain_name"] == "zoniraz.com"
+    assert "lp_da_display" in first_item
+    assert "target_pa_display" in first_item
+    assert "moz_spam_score_pct" in first_item
+    assert "moz_spam_risk_level" in first_item
+    assert second_item["domain_name"] == "commoncrawl.org"
+
 
 def test_footer_inside_pages():
     """Verify that inside footer subpages render with matching theme and 200 OK."""

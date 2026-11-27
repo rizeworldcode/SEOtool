@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Tuple
@@ -30,7 +32,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from loguru import logger
 
-from app.authority.ondemand import OnDemandAuthorityAnalyzer, OnDemandAuthorityReport
+from app.authority.ondemand import (
+    OnDemandAuthorityAnalyzer,
+    OnDemandAuthorityReport,
+    normalize_user_target,
+)
+from app.database.mongo_store import (
+    canonicalize_unique_url_key,
+    save_bulk_urls_to_mongodb_async,
+)
 from app.web.pages import get_footer_page_html, is_footer_page
 
 
@@ -72,6 +82,138 @@ def get_recent_history() -> List[Dict[str, Any]]:
     """Return list of recent check summaries."""
     with _HISTORY_LOCK:
         return list(_RECENT_CHECKS)
+
+
+MAX_BULK_URLS = 100
+_CSV_HEADER_STOPWORDS = {
+    "url", "urls", "domain", "domains", "website", "websites",
+    "link", "links", "site", "sites", "page", "pages", "target",
+    "address", "host", "hostname", "da", "pa", "spam", "score",
+}
+
+
+def extract_clean_bulk_tokens(raw_items: List[str]) -> List[str]:
+    """
+    Parse and filter a list of raw URL/domain strings (or comma/newline-delimited blocks),
+    returning clean candidate URL/domain tokens.
+    """
+    tokens: List[str] = []
+    for item in raw_items:
+        if not item or not isinstance(item, str):
+            continue
+        for part in re.split(r"[\r\n,;|\t\s]+", item.strip()):
+            cleaned = part.strip().strip("\"'`<>()[]{}")
+            if not cleaned:
+                continue
+            low = cleaned.lower()
+            if low in _CSV_HEADER_STOPWORDS:
+                continue
+            # Must look like a URL or domain containing a dot (e.g. example.com)
+            if "." not in cleaned or len(cleaned) < 4:
+                continue
+            tokens.append(cleaned)
+    return tokens
+
+
+def evaluate_bulk_urls(
+    raw_urls: List[str],
+    db_path: str = "./data/linkpilot.db",
+    enable_live_crawl: bool = True,
+    enable_archive_lookup: bool = False,
+) -> Dict[str, Any]:
+    """
+    Deduplicate and evaluate a batch of URLs for DA, PA, and Spam Score ONLY,
+    and persist unique URLs to MongoDB (skipping duplicates).
+    """
+    candidate_tokens = extract_clean_bulk_tokens(raw_urls)
+    total_submitted = len(candidate_tokens)
+    if total_submitted == 0:
+        return {
+            "status": "FAILED",
+            "error_message": "No valid URLs or domains found in input.",
+            "total_submitted": 0,
+            "unique_evaluated": 0,
+            "duplicates_skipped": 0,
+            "results": [],
+        }
+
+    unique_targets: List[Tuple[str, str, str, str]] = []
+    seen_target_urls: set[str] = set()
+    duplicates_skipped = 0
+
+    for raw_u in candidate_tokens:
+        try:
+            target_url, _target_key, root_url, site_boundary = normalize_user_target(raw_u)
+            if not site_boundary or "." not in site_boundary:
+                continue
+            canon_key = canonicalize_unique_url_key(target_url, site_boundary)
+            if not canon_key:
+                continue
+            if canon_key in seen_target_urls:
+                duplicates_skipped += 1
+                continue
+            seen_target_urls.add(canon_key)
+            unique_targets.append((raw_u, canon_key, root_url, site_boundary))
+        except Exception:
+            continue
+
+    if not unique_targets:
+        return {
+            "status": "FAILED",
+            "error_message": "Could not normalize any valid URLs from the provided list.",
+            "total_submitted": total_submitted,
+            "unique_evaluated": 0,
+            "duplicates_skipped": duplicates_skipped,
+            "results": [],
+        }
+
+    capped_targets = unique_targets[:MAX_BULK_URLS]
+
+    def _eval_single(item: Tuple[str, str, str, str]) -> Dict[str, Any]:
+        raw_u, norm_target_url, norm_root_url, site_boundary = item
+        analyzer = OnDemandAuthorityAnalyzer(
+            db_path=db_path,
+            max_internal_pages=1,
+            enable_live_crawl=enable_live_crawl,
+            enable_archive_lookup=enable_archive_lookup,
+        )
+        rep = analyzer.analyze(norm_target_url)
+        record_check_in_history(rep)
+        return {
+            "input_url": raw_u,
+            "target_url": rep.target_url or norm_target_url,
+            "root_url": rep.root_url or norm_root_url,
+            "domain_name": rep.domain_name or site_boundary,
+            "status": rep.status,
+            "error_message": rep.error_message,
+            "lp_da_display": round(float(rep.lp_da_display or 0.0), 1),
+            "target_pa_display": round(float(rep.target_pa_display or 0.0), 1),
+            "moz_spam_score_pct": round(float(rep.moz_spam_score_pct or 1.0), 1),
+            "moz_spam_risk_level": rep.moz_spam_risk_level or "Low",
+            "authority_tier": rep.authority_tier or "Standard",
+            "checked_at": rep.checked_at,
+            "execution_time_ms": round(float(rep.execution_time_ms or 0.0), 1),
+        }
+
+    max_workers = min(4, max(1, len(capped_targets)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        evaluated_list = list(pool.map(_eval_single, capped_targets))
+
+    results: List[Dict[str, Any]] = []
+    for idx, res in enumerate(evaluated_list):
+        res["rank"] = idx + 1
+        results.append(res)
+
+    # Persist all unique evaluated URLs to MongoDB asynchronously (upsert=True guarantees zero duplicates)
+    save_bulk_urls_to_mongodb_async(results)
+
+    return {
+        "status": "COMPLETED",
+        "total_submitted": total_submitted,
+        "unique_evaluated": len(results),
+        "duplicates_skipped": duplicates_skipped,
+        "results": results,
+    }
 
 
 def get_known_db_domains(db_path: str = "./data/linkpilot.db") -> List[Dict[str, Any]]:
@@ -716,6 +858,253 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .capsule-check-btn:disabled {
       opacity: 0.65;
       cursor: not-allowed;
+    }
+
+    .capsule-csv-btn {
+      background: #f1f5f9;
+      color: #0f172a;
+      border: 1.5px solid #cbd5e1;
+      border-radius: 9999px;
+      padding: 0.78rem 1.25rem;
+      font-size: 0.86rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      white-space: nowrap;
+      transition: all 0.2s ease;
+      margin-right: 0.45rem;
+      flex-shrink: 0;
+    }
+
+    .capsule-csv-btn:hover:not(:disabled) {
+      background: #e2e8f0;
+      border-color: #94a3b8;
+      transform: translateY(-1px);
+    }
+
+    .capsule-csv-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    @media (max-width: 640px) {
+      .capsule-search-pill {
+        flex-wrap: wrap;
+        border-radius: 22px;
+        padding: 0.65rem 0.75rem;
+        gap: 0.5rem;
+      }
+      .capsule-url-input {
+        width: 100%;
+        flex: 1 1 80%;
+        padding: 0.35rem 0;
+      }
+      .capsule-csv-btn,
+      .capsule-check-btn {
+        flex: 1 1 calc(50% - 0.35rem);
+        justify-content: center;
+        margin-right: 0;
+        padding: 0.72rem 0.85rem;
+        font-size: 0.83rem;
+      }
+    }
+
+    /* Bulk URL Results Table Section */
+    .bulk-results-card {
+      background: #ffffff;
+      border-radius: 24px;
+      border: 1px solid var(--border-light);
+      box-shadow: 0 12px 34px rgba(15, 23, 42, 0.06);
+      padding: 1.65rem 1.85rem;
+      margin-bottom: 2.25rem;
+    }
+
+    .bulk-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .bulk-title-group h2 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.38rem;
+      font-weight: 800;
+      color: #0f172a;
+      margin: 0 0 0.25rem 0;
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+    }
+
+    .bulk-title-group p {
+      font-size: 0.86rem;
+      color: #64748b;
+      margin: 0;
+    }
+
+    .bulk-actions-group {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      flex-wrap: wrap;
+    }
+
+    .bulk-export-btn {
+      background: #0f172a;
+      color: #ffffff;
+      border: none;
+      border-radius: 12px;
+      padding: 0.62rem 1.15rem;
+      font-size: 0.84rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      transition: all 0.18s ease;
+    }
+
+    .bulk-export-btn:hover {
+      background: #1e293b;
+      transform: translateY(-1px);
+    }
+
+    .bulk-clear-btn {
+      background: #f8fafc;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      padding: 0.62rem 1rem;
+      font-size: 0.84rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .bulk-clear-btn:hover {
+      background: #f1f5f9;
+      color: #0f172a;
+    }
+
+    .bulk-summary-strip {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.85rem;
+      margin-bottom: 1.35rem;
+    }
+
+    .bulk-stat-chip {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      padding: 0.85rem 1.1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .bulk-stat-label {
+      font-size: 0.74rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #64748b;
+    }
+
+    .bulk-stat-val {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.35rem;
+      font-weight: 800;
+      color: #0f172a;
+    }
+
+    .bulk-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      border-radius: 16px;
+      border: 1px solid #e2e8f0;
+    }
+
+    .bulk-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.9rem;
+    }
+
+    .bulk-table th {
+      background: #f8fafc;
+      color: #334155;
+      font-weight: 700;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0.9rem 1.1rem;
+      border-bottom: 1px solid #e2e8f0;
+      white-space: nowrap;
+    }
+
+    .bulk-table td {
+      padding: 0.9rem 1.1rem;
+      border-bottom: 1px solid #f1f5f9;
+      vertical-align: middle;
+    }
+
+    .bulk-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .bulk-table tbody tr:hover {
+      background: #f8fafc;
+    }
+
+    .bulk-metric-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.35rem 0.8rem;
+      border-radius: 999px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.86rem;
+      font-weight: 700;
+      min-width: 64px;
+    }
+
+    .bulk-pill-da {
+      background: #ffedd5;
+      color: #c2410c;
+      border: 1px solid #fed7aa;
+    }
+
+    .bulk-pill-pa {
+      background: #dbeafe;
+      color: #1d4ed8;
+      border: 1px solid #bfdbfe;
+    }
+
+    .bulk-pill-spam-low {
+      background: #dcfce7;
+      color: #15803d;
+      border: 1px solid #bbf7d0;
+    }
+
+    .bulk-pill-spam-med {
+      background: #fef3c7;
+      color: #b45309;
+      border: 1px solid #fde68a;
+    }
+
+    .bulk-pill-spam-high {
+      background: #fee2e2;
+      color: #b91c1c;
+      border: 1px solid #fecaca;
     }
 
     /* Crawler options row underneath capsule */
@@ -2776,11 +3165,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             type="text"
             id="urlInput"
             class="capsule-url-input"
-            placeholder="Enter domain (e.g. zoniraz.com)..."
+            placeholder="Enter domain or bulk URLs (comma/space separated)..."
             value=""
             required
             autocomplete="off"
           />
+          <input
+            type="file"
+            id="csvFileInput"
+            accept=".csv,.txt"
+            style="display: none;"
+            onchange="handleCsvFileUpload(event)"
+          />
+          <button
+            type="button"
+            id="uploadCsvBtn"
+            class="capsule-csv-btn"
+            onclick="document.getElementById('csvFileInput').click()"
+            title="Upload CSV or TXT file with bulk URLs"
+          >
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+            </svg>
+            <span>Upload CSV</span>
+          </button>
           <button type="submit" id="checkBtn" class="capsule-check-btn">
             <span>Analyze Authority</span>
             <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
@@ -2827,6 +3235,68 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     <!-- Error Alert -->
     <div id="errorBanner" class="error-banner"></div>
+
+    <!-- Bulk URL Authority Checker Results Section (DA, PA, Spam Score Only) -->
+    <div id="bulkResultsSection" style="display: none;">
+      <div class="bulk-results-card">
+        <div class="bulk-header-row">
+          <div class="bulk-title-group">
+            <h2>
+              <span>Bulk URL Authority &amp; Spam Score Report</span>
+              <span style="font-size: 0.75rem; background: #dcfce7; color: #166534; padding: 0.22rem 0.65rem; border-radius: 999px; font-weight: 700;">Unique MongoDB Sync</span>
+            </h2>
+            <p id="bulkSubtitleText">Showing Domain Authority (DA), Page Authority (PA), and Spam Score for each unique URL.</p>
+          </div>
+          <div class="bulk-actions-group">
+            <button type="button" class="bulk-export-btn" onclick="exportBulkResultsCsv()">
+              <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+              </svg>
+              <span>Export CSV</span>
+            </button>
+            <button type="button" class="bulk-clear-btn" onclick="resetView()">Clear Results</button>
+          </div>
+        </div>
+
+        <div class="bulk-summary-strip">
+          <div class="bulk-stat-chip">
+            <span class="bulk-stat-label">Unique URLs Analyzed</span>
+            <span class="bulk-stat-val" id="bulkStatUnique">0</span>
+          </div>
+          <div class="bulk-stat-chip">
+            <span class="bulk-stat-label">Duplicates Skipped</span>
+            <span class="bulk-stat-val" id="bulkStatDuplicates">0</span>
+          </div>
+          <div class="bulk-stat-chip">
+            <span class="bulk-stat-label">Average DA</span>
+            <span class="bulk-stat-val" id="bulkStatAvgDa">0.0</span>
+          </div>
+          <div class="bulk-stat-chip">
+            <span class="bulk-stat-label">Average PA</span>
+            <span class="bulk-stat-val" id="bulkStatAvgPa">0.0</span>
+          </div>
+          <div class="bulk-stat-chip">
+            <span class="bulk-stat-label">Average Spam Score</span>
+            <span class="bulk-stat-val" id="bulkStatAvgSpam">1.0%</span>
+          </div>
+        </div>
+
+        <div class="bulk-table-wrap">
+          <table class="bulk-table">
+            <thead>
+              <tr>
+                <th style="width: 60px;">#</th>
+                <th>URL / Domain</th>
+                <th style="text-align: center;">Domain Authority (DA)</th>
+                <th style="text-align: center;">Page Authority (PA)</th>
+                <th style="text-align: center;">Spam Score</th>
+              </tr>
+            </thead>
+            <tbody id="bulkResultsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
 
     <!-- Results Container (Shown only after user enters a link and runs analysis) -->
     <div id="resultsSection" style="display: none;">
@@ -3581,6 +4051,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         .replace(/"/g, "&quot;");
     }
 
+    window._lastBulkResults = [];
+
     function resetView() {
       const input = document.getElementById('urlInput');
       if (input) {
@@ -3588,6 +4060,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         input.focus();
       }
       document.getElementById('resultsSection').style.display = 'none';
+      const bulkSec = document.getElementById('bulkResultsSection');
+      if (bulkSec) bulkSec.style.display = 'none';
       const errBanner = document.getElementById('errorBanner');
       if (errBanner) errBanner.style.display = 'none';
       const ovSection = document.getElementById('authorityOverviewSection');
@@ -3599,14 +4073,217 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       executeCheck(url);
     }
 
+    const BULK_STOPWORDS = new Set([
+      'url', 'urls', 'domain', 'domains', 'website', 'websites',
+      'link', 'links', 'site', 'sites', 'page', 'pages', 'target',
+      'address', 'host', 'hostname', 'da', 'pa', 'spam', 'score'
+    ]);
+
+    function parseBulkUrlTokens(rawText) {
+      if (!rawText || typeof rawText !== 'string') return [];
+      const parts = rawText.split(/[\r\n,;|\t\s]+/);
+      const tokens = [];
+      for (const p of parts) {
+        const cleaned = p.trim().replace(/^["'`<>()\[\]{}]+|["'`<>()\[\]{}]+$/g, '');
+        if (!cleaned) continue;
+        if (BULK_STOPWORDS.has(cleaned.toLowerCase())) continue;
+        if (cleaned.indexOf('.') === -1 || cleaned.length < 4) continue;
+        tokens.push(cleaned);
+      }
+      return tokens;
+    }
+
     function handleCheckSubmit(e) {
       e.preventDefault();
-      const url = document.getElementById('urlInput').value.trim();
-      if (!url) {
+      const rawInput = document.getElementById('urlInput').value.trim();
+      if (!rawInput) {
         document.getElementById('urlInput').focus();
         return;
       }
-      executeCheck(url);
+      const tokens = parseBulkUrlTokens(rawInput);
+      if (tokens.length > 1) {
+        executeBulkCheck(tokens);
+      } else {
+        executeCheck(tokens.length === 1 ? tokens[0] : rawInput);
+      }
+    }
+
+    function handleCsvFileUpload(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const errBanner = document.getElementById('errorBanner');
+      if (errBanner) errBanner.style.display = 'none';
+
+      const reader = new FileReader();
+      reader.onload = function(loadEvt) {
+        const content = String(loadEvt.target.result || '');
+        const tokens = parseBulkUrlTokens(content);
+        if (tokens.length === 0) {
+          if (errBanner) {
+            errBanner.textContent = 'CSV Upload Error: No valid URLs or domain names were found in the uploaded file.';
+            errBanner.style.display = 'block';
+          }
+          return;
+        }
+        const inputEl = document.getElementById('urlInput');
+        if (inputEl) {
+          inputEl.value = tokens.slice(0, 5).join(', ') + (tokens.length > 5 ? ` (+${tokens.length - 5} more)` : '');
+        }
+        executeBulkCheck(tokens);
+      };
+      reader.onerror = function() {
+        if (errBanner) {
+          errBanner.textContent = 'CSV Upload Error: Unable to read the selected file.';
+          errBanner.style.display = 'block';
+        }
+      };
+      reader.readAsText(file);
+      event.target.value = '';
+    }
+
+    async function executeBulkCheck(urlList) {
+      if (!Array.isArray(urlList) || urlList.length === 0) return;
+
+      const btn = document.getElementById('checkBtn');
+      const csvBtn = document.getElementById('uploadCsvBtn');
+      const loading = document.getElementById('loadingBanner');
+      const errBanner = document.getElementById('errorBanner');
+      const liveCrawl = document.getElementById('optLiveCrawl').checked;
+      const archive = document.getElementById('optArchive').checked;
+
+      btn.disabled = true;
+      if (csvBtn) csvBtn.disabled = true;
+      errBanner.style.display = 'none';
+      document.getElementById('resultsSection').style.display = 'none';
+
+      safeSetText('loadingStepTitle', `Analyzing ${urlList.length} Bulk URLs (DA, PA & Spam Score)...`);
+      safeSetText('loadingStepSub', 'Deduplicating URLs, computing Domain/Page Authority & 27-Signal Spam Score, and saving unique URLs to MongoDB...');
+      loading.classList.add('active');
+
+      try {
+        const resp = await fetch('/api/bulk-check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            urls: urlList,
+            enable_live_crawl: liveCrawl,
+            enable_archive_lookup: archive
+          })
+        });
+
+        const data = await resp.json();
+        if (!resp.ok || data.status === 'FAILED') {
+          throw new Error(data.error_message || `HTTP Error ${resp.status}`);
+        }
+
+        renderBulkReport(data);
+        loadHistory();
+      } catch (err) {
+        errBanner.textContent = `Bulk Evaluation Error: ${err.message}`;
+        errBanner.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        if (csvBtn) csvBtn.disabled = false;
+        loading.classList.remove('active');
+        safeSetText('loadingStepTitle', 'Analyzing URL & Building Web Graph...');
+        safeSetText('loadingStepSub', 'Extracting internal/external links, querying Wayback CDX & solving PageRank...');
+      }
+    }
+
+    function renderBulkReport(data) {
+      const results = data.results || [];
+      window._lastBulkResults = results;
+
+      const singleSection = document.getElementById('resultsSection');
+      if (singleSection) singleSection.style.display = 'none';
+      const ovSection = document.getElementById('authorityOverviewSection');
+      if (ovSection) ovSection.style.display = 'none';
+
+      const bulkSection = document.getElementById('bulkResultsSection');
+      if (bulkSection) bulkSection.style.display = 'block';
+
+      safeSetText('bulkStatUnique', String(data.unique_evaluated || results.length));
+      safeSetText('bulkStatDuplicates', String(data.duplicates_skipped || 0));
+
+      let sumDa = 0, sumPa = 0, sumSpam = 0;
+      results.forEach(r => {
+        sumDa += Number(r.lp_da_display || 0);
+        sumPa += Number(r.target_pa_display || 0);
+        sumSpam += Number(r.moz_spam_score_pct || 1);
+      });
+      const count = Math.max(1, results.length);
+      safeSetText('bulkStatAvgDa', (sumDa / count).toFixed(1));
+      safeSetText('bulkStatAvgPa', (sumPa / count).toFixed(1));
+      safeSetText('bulkStatAvgSpam', `${(sumSpam / count).toFixed(1)}%`);
+
+      const tbody = document.getElementById('bulkResultsTableBody');
+      if (!tbody) return;
+
+      tbody.innerHTML = results.map((item, idx) => {
+        const da = Number(item.lp_da_display || 0).toFixed(1);
+        const pa = Number(item.target_pa_display || 0).toFixed(1);
+        const spamPct = Number(item.moz_spam_score_pct || 1).toFixed(1);
+        const risk = item.moz_spam_risk_level || 'Low';
+        let spamClass = 'bulk-pill-spam-low';
+        if (risk === 'High') spamClass = 'bulk-pill-spam-high';
+        else if (risk === 'Medium') spamClass = 'bulk-pill-spam-med';
+
+        const targetUrl = item.target_url || item.input_url || '';
+        const domainName = item.domain_name || '';
+
+        return `
+          <tr>
+            <td style="font-weight: 700; color: #64748b;">${item.rank || (idx + 1)}</td>
+            <td>
+              <div style="font-weight: 700; color: #0f172a; word-break: break-all;">
+                <a href="${escapeHtml(targetUrl)}" target="_blank" rel="noopener noreferrer" style="color: #0f172a; text-decoration: none;">
+                  ${escapeHtml(targetUrl)}
+                </a>
+              </div>
+              <div style="font-size: 0.78rem; color: #64748b; margin-top: 0.15rem;">
+                Domain: <strong>${escapeHtml(domainName)}</strong>
+              </div>
+            </td>
+            <td style="text-align: center;">
+              <span class="bulk-metric-pill bulk-pill-da">${da}</span>
+            </td>
+            <td style="text-align: center;">
+              <span class="bulk-metric-pill bulk-pill-pa">${pa}</span>
+            </td>
+            <td style="text-align: center;">
+              <span class="bulk-metric-pill ${spamClass}">${spamPct}% (${escapeHtml(risk)})</span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function exportBulkResultsCsv() {
+      const rows = window._lastBulkResults || [];
+      if (!rows.length) return;
+      const headers = ['Rank', 'URL', 'Domain', 'Domain Authority (DA)', 'Page Authority (PA)', 'Spam Score (%)', 'Spam Risk Level'];
+      const csvLines = [headers.join(',')];
+      rows.forEach((r, idx) => {
+        const line = [
+          r.rank || (idx + 1),
+          `"${String(r.target_url || '').replace(/"/g, '""')}"`,
+          `"${String(r.domain_name || '').replace(/"/g, '""')}"`,
+          Number(r.lp_da_display || 0).toFixed(1),
+          Number(r.target_pa_display || 0).toFixed(1),
+          Number(r.moz_spam_score_pct || 1).toFixed(1),
+          `"${String(r.moz_spam_risk_level || 'Low').replace(/"/g, '""')}"`
+        ];
+        csvLines.push(line.join(','));
+      });
+      const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `rizemetrics-bulk-authority-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     }
 
     async function executeCheck(url) {
@@ -3664,6 +4341,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
 
     function renderReport(r) {
+      const bulkSec = document.getElementById('bulkResultsSection');
+      if (bulkSec) bulkSec.style.display = "none";
       const resSection = document.getElementById('resultsSection');
       if (resSection) resSection.style.display = "block";
       const ovSection = document.getElementById('authorityOverviewSection');
@@ -4137,6 +4816,41 @@ def handle_web_request(
             record_check_in_history(report)
             code = int(HTTPStatus.OK) if report.status == "COMPLETED" else int(HTTPStatus.BAD_REQUEST)
             return code, "application/json; charset=utf-8", report.to_dict()
+
+        if path == "/api/bulk-check":
+            try:
+                body = json.loads(raw_body or "{}")
+            except json.JSONDecodeError:
+                return int(HTTPStatus.BAD_REQUEST), "application/json; charset=utf-8", {
+                    "status": "FAILED",
+                    "error_message": "Invalid JSON request body.",
+                }
+
+            raw_urls = body.get("urls")
+            if isinstance(raw_urls, str):
+                raw_urls_list = [raw_urls]
+            elif isinstance(raw_urls, list):
+                raw_urls_list = [str(u) for u in raw_urls if u is not None]
+            else:
+                raw_urls_list = []
+
+            if not raw_urls_list:
+                return int(HTTPStatus.BAD_REQUEST), "application/json; charset=utf-8", {
+                    "status": "FAILED",
+                    "error_message": "Please provide a list of URLs or domains to check.",
+                }
+
+            live_crawl = bool(body.get("enable_live_crawl", True))
+            archive = bool(body.get("enable_archive_lookup", False))
+
+            bulk_payload = evaluate_bulk_urls(
+                raw_urls=raw_urls_list,
+                db_path=db_path,
+                enable_live_crawl=live_crawl,
+                enable_archive_lookup=archive,
+            )
+            code = int(HTTPStatus.OK) if bulk_payload.get("status") == "COMPLETED" else int(HTTPStatus.BAD_REQUEST)
+            return code, "application/json; charset=utf-8", bulk_payload
 
         return int(HTTPStatus.NOT_FOUND), "application/json; charset=utf-8", {
             "status": "FAILED",

@@ -20,6 +20,7 @@ import os
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 from loguru import logger
 
 _MONGO_LOCK = threading.Lock()
@@ -27,6 +28,30 @@ _MONGO_CLIENT: Any = None
 _MONGO_URI_CACHED: Optional[str] = None
 
 DEFAULT_DB_NAME = "linkpilot_seo"
+
+
+def canonicalize_unique_url_key(url: str, fallback_domain: str = "") -> str:
+    """
+    Canonicalize any URL so that http/https, www/non-www, and trailing-slash root variants
+    resolve to the exact same unique URL key (e.g. 'https://zoniraz.com/' or 'https://zoniraz.com/about').
+    Guarantees that the same URL is never stored twice in MongoDB.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlsplit(raw)
+    host = (parsed.hostname or fallback_domain or "").lower().strip(".")
+    if host.startswith("www.") and len(host) > 4:
+        host = host[4:]
+    if not host:
+        return raw.lower()
+    path = parsed.path or "/"
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"https://{host}{path}{query}"
 
 
 def get_configured_mongo_uri() -> Optional[str]:
@@ -92,9 +117,11 @@ def save_report_to_mongodb_sync(report_dict: Dict[str, Any]) -> bool:
         from pymongo import UpdateOne
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        domain_name = report_dict.get("domain_name") or ""
-        target_url = report_dict.get("target_url") or ""
-        root_url = report_dict.get("root_url") or ""
+        domain_name = (report_dict.get("domain_name") or "").strip().lower()
+        raw_target_url = report_dict.get("target_url") or ""
+        target_url = canonicalize_unique_url_key(raw_target_url, domain_name) or raw_target_url
+        raw_root_url = report_dict.get("root_url") or (f"https://{domain_name}/" if domain_name else "")
+        root_url = canonicalize_unique_url_key(raw_root_url, domain_name) or raw_root_url
         if not domain_name:
             return False
 
@@ -205,29 +232,219 @@ def save_report_to_mongodb_sync(report_dict: Dict[str, Any]) -> bool:
         if page_ops:
             db["pages"].bulk_write(page_ops, ordered=False)
 
-        # 3. Insert Check Audit Snapshot in `check_history`
-        db["check_history"].insert_one({
-            "query_input": report_dict.get("query_input"),
-            "target_url": target_url,
-            "main_url": root_url,
-            "domain_name": domain_name,
-            "checked_at": now_iso,
-            "lp_da_display": report_dict.get("lp_da_display"),
-            "target_pa_display": report_dict.get("target_pa_display"),
-            "moz_spam_score_pct": report_dict.get("moz_spam_score_pct"),
-            "moz_spam_risk_level": report_dict.get("moz_spam_risk_level"),
-            "all_page_urls": all_page_urls,
-            "inbound_backlinks_sample": inbound_backlinks[:50],
-            "external_links_sample": external_links[:50],
-        })
+        # 3. Upsert Unique URL in `unique_urls` & `check_history` (Never insert duplicate URLs)
+        if target_url:
+            db["unique_urls"].update_one(
+                {"normalized_url": target_url},
+                {
+                    "$set": {
+                        "normalized_url": target_url,
+                        "target_url": target_url,
+                        "main_url": root_url,
+                        "domain_name": domain_name,
+                        "lp_da_display": report_dict.get("lp_da_display"),
+                        "target_pa_display": report_dict.get("target_pa_display"),
+                        "moz_spam_score_pct": report_dict.get("moz_spam_score_pct"),
+                        "moz_spam_risk_level": report_dict.get("moz_spam_risk_level"),
+                        "last_checked_at": now_iso,
+                    },
+                    "$setOnInsert": {"first_seen_at": now_iso},
+                },
+                upsert=True,
+            )
+
+        db["check_history"].update_one(
+            {"target_url": target_url or root_url},
+            {
+                "$set": {
+                    "query_input": report_dict.get("query_input"),
+                    "target_url": target_url,
+                    "main_url": root_url,
+                    "domain_name": domain_name,
+                    "checked_at": now_iso,
+                    "lp_da_display": report_dict.get("lp_da_display"),
+                    "target_pa_display": report_dict.get("target_pa_display"),
+                    "moz_spam_score_pct": report_dict.get("moz_spam_score_pct"),
+                    "moz_spam_risk_level": report_dict.get("moz_spam_risk_level"),
+                    "all_page_urls": all_page_urls,
+                    "inbound_backlinks_sample": inbound_backlinks[:50],
+                    "external_links_sample": external_links[:50],
+                },
+                "$setOnInsert": {"first_checked_at": now_iso},
+            },
+            upsert=True,
+        )
 
         logger.info(
-            f"MongoDB persisted {domain_name} (main={root_url}, {len(all_page_urls)} page URLs)"
+            f"MongoDB persisted unique URL {target_url} ({domain_name}, {len(all_page_urls)} page URLs)"
         )
         return True
     except Exception as e:
         logger.debug(f"MongoDB persistence failed for {report_dict.get('domain_name')}: {e}")
         return False
+
+
+def save_bulk_urls_to_mongodb_sync(results: List[Dict[str, Any]]) -> int:
+    """
+    Persist a batch of evaluated bulk URL items into MongoDB with strict uniqueness:
+      - Deduplicates by normalized `target_url` before writing.
+      - Upserts into `unique_urls`, `pages`, `domains`, and `check_history` by unique URL/domain key
+        so the same URL is never saved twice.
+    Returns count of unique URLs upserted.
+    """
+    if not results:
+        return 0
+
+    # Deduplicate in-memory first by canonical target_url
+    unique_items: Dict[str, Dict[str, Any]] = {}
+    for item in results:
+        if not item or item.get("status") != "COMPLETED":
+            continue
+        dom = (item.get("domain_name") or "").strip().lower()
+        raw_u = (item.get("target_url") or item.get("input_url") or "").strip()
+        norm_url = canonicalize_unique_url_key(raw_u, dom)
+        if not norm_url or norm_url in unique_items:
+            continue
+        unique_items[norm_url] = item
+
+    if not unique_items:
+        return 0
+
+    db = _get_mongo_db()
+    if db is None:
+        return 0
+
+    try:
+        from pymongo import UpdateOne
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        unique_url_ops = []
+        page_ops = []
+        domain_ops = []
+        history_ops = []
+        seen_domains = set()
+
+        for norm_url, item in unique_items.items():
+            domain_name = (item.get("domain_name") or "").strip()
+            root_url = item.get("root_url") or (f"https://{domain_name}/" if domain_name else norm_url)
+            da_val = item.get("lp_da_display")
+            pa_val = item.get("target_pa_display")
+            spam_pct = item.get("moz_spam_score_pct")
+            spam_risk = item.get("moz_spam_risk_level")
+
+            unique_url_ops.append(
+                UpdateOne(
+                    {"normalized_url": norm_url},
+                    {
+                        "$set": {
+                            "normalized_url": norm_url,
+                            "target_url": norm_url,
+                            "main_url": root_url,
+                            "domain_name": domain_name,
+                            "lp_da_display": da_val,
+                            "target_pa_display": pa_val,
+                            "moz_spam_score_pct": spam_pct,
+                            "moz_spam_risk_level": spam_risk,
+                            "last_checked_at": now_iso,
+                        },
+                        "$setOnInsert": {"first_seen_at": now_iso},
+                    },
+                    upsert=True,
+                )
+            )
+
+            page_ops.append(
+                UpdateOne(
+                    {"normalized_url": norm_url},
+                    {
+                        "$set": {
+                            "normalized_url": norm_url,
+                            "domain_name": domain_name,
+                            "main_url": root_url,
+                            "lp_pa_display": pa_val,
+                            "last_checked_at": now_iso,
+                        },
+                        "$setOnInsert": {
+                            "first_seen_at": now_iso,
+                            "source_type": "bulk_url_check",
+                        },
+                    },
+                    upsert=True,
+                )
+            )
+
+            history_ops.append(
+                UpdateOne(
+                    {"target_url": norm_url},
+                    {
+                        "$set": {
+                            "query_input": item.get("input_url") or norm_url,
+                            "target_url": norm_url,
+                            "main_url": root_url,
+                            "domain_name": domain_name,
+                            "checked_at": now_iso,
+                            "lp_da_display": da_val,
+                            "target_pa_display": pa_val,
+                            "moz_spam_score_pct": spam_pct,
+                            "moz_spam_risk_level": spam_risk,
+                        },
+                        "$setOnInsert": {"first_checked_at": now_iso},
+                    },
+                    upsert=True,
+                )
+            )
+
+            if domain_name and domain_name not in seen_domains:
+                seen_domains.add(domain_name)
+                domain_ops.append(
+                    UpdateOne(
+                        {"domain_name": domain_name},
+                        {
+                            "$set": {
+                                "domain_name": domain_name,
+                                "main_url": root_url,
+                                "last_target_url": norm_url,
+                                "lp_da_display": da_val,
+                                "target_pa_display": pa_val,
+                                "moz_spam_score_pct": spam_pct,
+                                "moz_spam_risk_level": spam_risk,
+                                "last_checked_at": now_iso,
+                            },
+                            "$setOnInsert": {"first_checked_at": now_iso},
+                            "$addToSet": {"all_page_urls": norm_url},
+                        },
+                        upsert=True,
+                    )
+                )
+
+        if unique_url_ops:
+            db["unique_urls"].bulk_write(unique_url_ops, ordered=False)
+        if page_ops:
+            db["pages"].bulk_write(page_ops, ordered=False)
+        if domain_ops:
+            db["domains"].bulk_write(domain_ops, ordered=False)
+        if history_ops:
+            db["check_history"].bulk_write(history_ops, ordered=False)
+
+        logger.info(f"MongoDB bulk upserted {len(unique_items)} unique URLs")
+        return len(unique_items)
+    except Exception as e:
+        logger.debug(f"MongoDB bulk persistence failed: {e}")
+        return 0
+
+
+def save_bulk_urls_to_mongodb_async(results: List[Dict[str, Any]]) -> None:
+    """
+    Fire-and-forget background thread to persist unique bulk URLs into MongoDB.
+    """
+    if not get_configured_mongo_uri() or not results:
+        return
+    t = threading.Thread(
+        target=save_bulk_urls_to_mongodb_sync,
+        args=(results,),
+        daemon=True,
+    )
+    t.start()
 
 
 def save_report_to_mongodb_async(report_dict: Dict[str, Any]) -> None:
