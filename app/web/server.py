@@ -1131,7 +1131,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     }
 
     /* =====================================================================
-       8:15 PM LAUNCH COUNTDOWN BLUR OVERLAY
+       8:20 PM GRAND RIBBON-CUTTING LAUNCH COUNTDOWN & OPENING ANIMATION
        ===================================================================== */
     body.launch-locked {
       overflow: hidden !important;
@@ -1141,8 +1141,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     body.launch-locked > *:not(#launchCountdownOverlay) {
       filter: blur(14px) !important;
       -webkit-filter: blur(14px) !important;
+      transform: scale(0.97);
+      transition: filter 1.2s cubic-bezier(0.22, 1, 0.36, 1), transform 1.2s cubic-bezier(0.22, 1, 0.36, 1);
       pointer-events: none !important;
       user-select: none !important;
+    }
+
+    body.launch-revealing > *:not(#launchCountdownOverlay) {
+      filter: blur(0px) !important;
+      -webkit-filter: blur(0px) !important;
+      transform: scale(1);
+      transition: filter 1.3s cubic-bezier(0.22, 1, 0.36, 1), transform 1.3s cubic-bezier(0.22, 1, 0.36, 1);
     }
 
     .launch-countdown-overlay {
@@ -1153,27 +1162,204 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       padding: 1.5rem;
-      background: rgba(15, 23, 42, 0.62);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
       box-sizing: border-box;
+      overflow: hidden;
     }
 
     .launch-countdown-overlay.active {
       display: flex;
     }
 
+    /* Split Frosted Curtains for Grand Page Reveal */
+    .launch-curtain-left,
+    .launch-curtain-right {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 50.5%;
+      background: rgba(15, 23, 42, 0.68);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      z-index: 1;
+      transition: transform 1.35s cubic-bezier(0.77, 0, 0.175, 1), opacity 1.2s ease;
+    }
+
+    .launch-curtain-left {
+      left: 0;
+      border-right: 1px solid rgba(217, 249, 66, 0.25);
+    }
+
+    .launch-curtain-right {
+      right: 0;
+      border-left: 1px solid rgba(217, 249, 66, 0.25);
+    }
+
+    .launch-countdown-overlay.opening .launch-curtain-left {
+      transform: translateX(-105%);
+      opacity: 0;
+      transition-delay: 0.65s;
+    }
+
+    .launch-countdown-overlay.opening .launch-curtain-right {
+      transform: translateX(105%);
+      opacity: 0;
+      transition-delay: 0.65s;
+    }
+
+    /* Full-Screen Horizontal Red & Gold Satin Ribbon */
+    .launch-ribbon-track {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      height: 64px;
+      z-index: 4;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .launch-ribbon-half {
+      position: absolute;
+      top: 8px;
+      height: 48px;
+      width: 52%;
+      background: linear-gradient(180deg, #ef4444 0%, #dc2626 45%, #991b1b 100%);
+      border-top: 3px solid #fde047;
+      border-bottom: 3px solid #eab308;
+      box-shadow: 0 12px 30px rgba(153, 27, 27, 0.55), inset 0 2px 8px rgba(255, 255, 255, 0.35);
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      transition: transform 1.15s cubic-bezier(0.68, -0.15, 0.265, 1.35), opacity 0.95s ease;
+    }
+
+    .launch-ribbon-half::after {
+      content: "GRAND LAUNCH • RIZEMETRICS • GRAND LAUNCH • RIZEMETRICS •";
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.22em;
+      color: rgba(254, 240, 138, 0.85);
+      white-space: nowrap;
+      padding: 0 1.5rem;
+    }
+
+    .launch-ribbon-left {
+      left: -2%;
+      transform-origin: left center;
+      justify-content: flex-end;
+    }
+
+    .launch-ribbon-right {
+      right: -2%;
+      transform-origin: right center;
+      justify-content: flex-start;
+    }
+
+    .launch-countdown-overlay.opening .launch-ribbon-left {
+      transform: translateX(-115%) rotate(-14deg) translateY(60px);
+      opacity: 0;
+    }
+
+    .launch-countdown-overlay.opening .launch-ribbon-right {
+      transform: translateX(115%) rotate(14deg) translateY(60px);
+      opacity: 0;
+    }
+
+    /* Center Ribbon Bow & Golden Scissors Medallion */
+    .launch-ribbon-bow {
+      position: relative;
+      z-index: 6;
+      width: 96px;
+      height: 96px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #fef08a 0%, #eab308 55%, #b45309 100%);
+      border: 4px solid #ffffff;
+      box-shadow: 0 12px 35px rgba(234, 179, 8, 0.65), 0 0 0 8px rgba(220, 38, 38, 0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #7f1d1d;
+      font-size: 2.1rem;
+      transition: transform 0.65s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.55s ease;
+      animation: bowFloat 2.2s infinite ease-in-out;
+    }
+
+    @keyframes bowFloat {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.07); }
+    }
+
+    .launch-countdown-overlay.opening .launch-ribbon-bow {
+      animation: none;
+      transform: scale(2.1) rotate(25deg);
+      opacity: 0;
+    }
+
+    .launch-confetti-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 7;
+      pointer-events: none;
+    }
+
     .launch-countdown-card {
       max-width: 660px;
       width: 100%;
-      background: rgba(255, 255, 255, 0.96);
-      border: 2px solid rgba(217, 249, 66, 0.85);
+      background: rgba(255, 255, 255, 0.97);
+      border: 2.5px solid rgba(217, 249, 66, 0.9);
       border-radius: 32px;
       padding: 2.75rem 2.25rem;
       text-align: center;
-      box-shadow: 0 28px 80px rgba(15, 23, 42, 0.45), 0 0 0 8px rgba(217, 249, 66, 0.15);
+      box-shadow: 0 28px 80px rgba(15, 23, 42, 0.5), 0 0 0 8px rgba(217, 249, 66, 0.16);
       position: relative;
+      z-index: 5;
       overflow: hidden;
+      transition: transform 0.65s cubic-bezier(0.55, 0.055, 0.675, 0.19), opacity 0.55s ease;
+    }
+
+    .launch-countdown-overlay.opening .launch-countdown-card {
+      transform: scale(0.75) translateY(-30px);
+      opacity: 0;
+    }
+
+    /* Celebration Welcome Banner Shown as Ribbon Cuts */
+    .launch-welcome-burst {
+      position: absolute;
+      z-index: 8;
+      text-align: center;
+      pointer-events: none;
+      opacity: 0;
+      transform: scale(0.5);
+      transition: transform 0.75s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.5s ease;
+    }
+
+    .launch-countdown-overlay.opening .launch-welcome-burst {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    .launch-countdown-overlay.opening-fadeout .launch-welcome-burst {
+      opacity: 0;
+      transform: scale(1.25);
+    }
+
+    .launch-welcome-pill {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: #d9f942;
+      border: 3px solid #fde047;
+      padding: 1.35rem 2.6rem;
+      border-radius: 999px;
+      font-family: 'Outfit', sans-serif;
+      font-size: clamp(1.35rem, 4vw, 2.25rem);
+      font-weight: 800;
+      box-shadow: 0 24px 64px rgba(15, 23, 42, 0.55), 0 0 40px rgba(217, 249, 66, 0.55);
+      letter-spacing: -0.02em;
     }
 
     .launch-badge-pill {
@@ -3317,8 +3503,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <!-- 8:15 PM Today Official Launch Countdown Overlay -->
+  <!-- 8:20 PM Today Official Launch Countdown & Automatic Ribbon-Cutting Overlay -->
   <div id="launchCountdownOverlay" class="launch-countdown-overlay" aria-live="polite">
+    <div class="launch-curtain-left"></div>
+    <div class="launch-curtain-right"></div>
+
+    <div class="launch-ribbon-track">
+      <div class="launch-ribbon-half launch-ribbon-left"></div>
+      <div class="launch-ribbon-bow" title="Automatic Grand Opening Ribbon">✂️</div>
+      <div class="launch-ribbon-half launch-ribbon-right"></div>
+    </div>
+
+    <canvas id="launchConfettiCanvas" class="launch-confetti-canvas"></canvas>
+
+    <div class="launch-welcome-burst">
+      <div class="launch-welcome-pill">🎉 RizeMetrics is Now Live! 🚀</div>
+    </div>
+
     <div class="launch-countdown-card">
       <div class="launch-brand-row">
         <img src="/logo.png" alt="RizeMetrics Logo" />
@@ -3326,9 +3527,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <span style="color: #ee591e;">Rize</span><span style="color: #2a7c37;">Metrics</span>
         </div>
       </div>
-      <h2 class="launch-title">We Are Launching Tonight at 8:15 PM!</h2>
+      <h2 class="launch-title">We Are Launching Tonight at 8:20 PM!</h2>
       <p class="launch-subtitle">
-        Get ready for unlimited Domain Authority (DA), Page Authority (PA), Bulk URL CSV Analysis &amp; 27-Signal Spam Score Intelligence. The platform unlocks automatically when the timer hits zero.
+        Get ready for unlimited Domain Authority (DA), Page Authority (PA), Bulk URL CSV Analysis &amp; 27-Signal Spam Score Intelligence. The ribbon cuts automatically when the timer hits zero.
       </p>
       <div class="launch-timer-grid" style="margin-bottom: 0.25rem;">
         <div class="launch-time-box">
@@ -4901,15 +5102,100 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    function fireRibbonConfetti() {
+      const canvas = document.getElementById('launchConfettiCanvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      const colors = ['#ee591e', '#2a7c37', '#d9f942', '#eab308', '#ef4444', '#38bdf8', '#a855f7'];
+      const particles = [];
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+
+      for (let i = 0; i < 150; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 5 + Math.random() * 16;
+        particles.push({
+          x: cx,
+          y: cy,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - (3 + Math.random() * 6),
+          w: 7 + Math.random() * 8,
+          h: 5 + Math.random() * 6,
+          color: colors[i % colors.length],
+          rot: Math.random() * 360,
+          vRot: (Math.random() - 0.5) * 14,
+          alpha: 1
+        });
+      }
+
+      function animateConfetti() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let alive = false;
+        for (const p of particles) {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vy += 0.35;
+          p.vx *= 0.985;
+          p.rot += p.vRot;
+          p.alpha -= 0.008;
+          if (p.alpha > 0 && p.y < canvas.height + 40) {
+            alive = true;
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, p.alpha);
+            ctx.translate(p.x, p.y);
+            ctx.rotate((p.rot * Math.PI) / 180);
+            ctx.fillStyle = p.color;
+            ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+            ctx.restore();
+          }
+        }
+        if (alive) {
+          requestAnimationFrame(animateConfetti);
+        }
+      }
+      requestAnimationFrame(animateConfetti);
+    }
+
+    function triggerRibbonOpeningCeremony(overlay) {
+      if (window._ribbonCeremonyRunning) return;
+      window._ribbonCeremonyRunning = true;
+
+      safeSetText('cdHours', '00');
+      safeSetText('cdMinutes', '00');
+      safeSetText('cdSeconds', '00');
+
+      // Start ribbon slice + curtain reveal + confetti burst
+      overlay.classList.add('opening');
+      document.body.classList.remove('launch-locked');
+      document.body.classList.add('launch-revealing');
+      fireRibbonConfetti();
+
+      setTimeout(() => {
+        overlay.classList.add('opening-fadeout');
+      }, 1700);
+
+      setTimeout(() => {
+        overlay.classList.remove('active', 'opening', 'opening-fadeout');
+        document.body.classList.remove('launch-revealing');
+        window._ribbonCeremonyRunning = false;
+      }, 2400);
+    }
+
     function initLaunchCountdownGate() {
       const overlay = document.getElementById('launchCountdownOverlay');
       if (!overlay) return;
 
-      // Launch target: Today at 8:15 PM (20:15:00) IST (UTC+05:30)
+      // Launch target: Today at 8:20 PM (20:20:00) IST (UTC+05:30).
+      // If page is opened between 8:20 PM and 8:35 PM IST while testing after deploy,
+      // run a live 12-second countdown so the automatic ribbon-cutting & curtain reveal can be tested live.
       const LAUNCH_HOUR = 20;
-      const LAUNCH_MINUTE = 15;
+      const LAUNCH_MINUTE = 20;
       const LAUNCH_SECOND = 0;
       const ALLOWED_LAUNCH_DATES = new Set(['__SERVER_LAUNCH_DATE_IST__', '2026-11-27']);
+      let testPreviewTargetEpoch = null;
 
       function getRemainingLaunchMs() {
         const now = new Date();
@@ -4933,21 +5219,39 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
         const elapsedTodayMs = ((curHours * 3600) + (curMins * 60) + curSecs) * 1000 + curMillis;
         const targetTodayMs = ((LAUNCH_HOUR * 3600) + (LAUNCH_MINUTE * 60) + LAUNCH_SECOND) * 1000;
-        return targetTodayMs - elapsedTodayMs;
+        const windowEndMs = ((20 * 3600) + (38 * 60)) * 1000; // 8:38 PM IST test window
+
+        if (elapsedTodayMs < targetTodayMs) {
+          return targetTodayMs - elapsedTodayMs;
+        }
+        if (elapsedTodayMs >= targetTodayMs && elapsedTodayMs < windowEndMs) {
+          if (testPreviewTargetEpoch === null) {
+            testPreviewTargetEpoch = Date.now() + 10000; // 10-second live countdown for immediate ribbon-cut test
+          }
+          return testPreviewTargetEpoch - Date.now();
+        }
+        return 0;
       }
+
+      let wasCountingDown = false;
 
       function updateCountdownDisplay() {
         const remMs = getRemainingLaunchMs();
         if (remMs <= 0) {
-          overlay.classList.remove('active');
-          document.body.classList.remove('launch-locked');
           if (window._launchCountdownTimer) {
             clearInterval(window._launchCountdownTimer);
             window._launchCountdownTimer = null;
           }
+          if (wasCountingDown || overlay.classList.contains('active')) {
+            triggerRibbonOpeningCeremony(overlay);
+          } else {
+            overlay.classList.remove('active');
+            document.body.classList.remove('launch-locked');
+          }
           return;
         }
 
+        wasCountingDown = true;
         if (!overlay.classList.contains('active')) {
           overlay.classList.add('active');
           document.body.classList.add('launch-locked');
@@ -4965,7 +5269,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
       updateCountdownDisplay();
       if (getRemainingLaunchMs() > 0) {
-        window._launchCountdownTimer = setInterval(updateCountdownDisplay, 250);
+        window._launchCountdownTimer = setInterval(updateCountdownDisplay, 200);
       }
     }
 
