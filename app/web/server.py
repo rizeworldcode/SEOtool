@@ -3598,15 +3598,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <span>Live Mini-Crawler</span>
           </label>
           <label class="hero-opt-badge" title="Query Internet Archive Wayback CDX">
-            <input type="checkbox" id="optArchive" style="accent-color: #0f172a;" />
+            <input type="checkbox" id="optArchive" checked style="accent-color: #0f172a;" />
             <span>Wayback CDX History</span>
           </label>
           <label class="hero-opt-badge">
             <span>Max Internal Pages:</span>
             <select id="optMaxPages" class="hero-select">
-              <option value="1" selected>1 page (Fastest)</option>
+              <option value="1">1 page (Fastest)</option>
               <option value="3">3 pages</option>
-              <option value="5">5 pages (Balanced)</option>
+              <option value="5" selected>5 pages (Balanced)</option>
               <option value="10">10 pages (Deep)</option>
             </select>
           </label>
