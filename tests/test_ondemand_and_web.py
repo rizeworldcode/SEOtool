@@ -393,6 +393,81 @@ def test_ondemand_ssrf_protection():
     assert "SSRF" in (rep.error_message or "")
 
 
+def test_ondemand_react_vite_spa_phone_email_social_and_routes():
+    """
+    OD-10: Verify that client-rendered React/Vite SPA websites (like rizeworld.in)
+    whose phone number ('90246 15510'), email ('hr.rizeworld@gmail.com'), social links,
+    and navigation routes live inside a <script src="/assets/index-*.js"> bundle
+    accurately pass S01 (Pages Found), S08 (Phone), S09 (Social Links), S10 (Email),
+    and S13 (Verified Business Footprint) with a 1.0% Low Spam Score.
+    """
+    def spa_handler(request: httpx.Request) -> httpx.Response:
+        u = str(request.url)
+        if "/assets/index-spa123.js" in u:
+            js_code = """
+            const routes = [
+              { path: "/services", title: "Digital Marketing & SEO Services" },
+              { path: "/portfolio", title: "Our Client Portfolio & Case Studies" },
+              { path: "/locations", title: "Locations Across India" },
+              { path: "/company", title: "About Rizeworld Digital Marketing Company" },
+              { path: "/resources", title: "SEO Blogs, FAQs & Pricing" },
+              { path: "/contact", title: "Contact Our Team Today" }
+            ];
+            const footerContact = {
+              phone: "90246 15510",
+              email: "hr.rizeworld@gmail.com",
+              hq: "Alwar, Rajasthan 301001",
+              socials: [
+                "https://www.facebook.com/rizeworld",
+                "https://www.linkedin.com/company/rizeworld",
+                "https://www.instagram.com/rizeworld"
+              ]
+            };
+            """
+            return httpx.Response(200, text=js_code, headers={"Content-Type": "application/javascript"})
+
+        return httpx.Response(
+            200,
+            text="""
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+              <title>Rizeworld - Best Digital Marketing & SEO Company in India</title>
+              <meta name="description" content="Rizeworld is a full-service digital marketing, SEO, web development, and paid ads company." />
+              <link rel="canonical" href="https://rizeworld.in/" />
+              <link rel="icon" href="/favicon.ico" />
+              <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&display=swap" rel="stylesheet" />
+              <script src="https://www.googletagmanager.com/gtm.js?id=GTM-RIZE"></script>
+            </head>
+            <body>
+              <div id="root"></div>
+              <script type="module" crossorigin src="/assets/index-spa123.js"></script>
+            </body>
+            </html>
+            """,
+            headers={"Content-Type": "text/html"},
+        )
+
+    spa_client = httpx.Client(transport=httpx.MockTransport(spa_handler))
+    analyzer = OnDemandAuthorityAnalyzer(
+        max_internal_pages=1,
+        enable_live_crawl=True,
+        enable_archive_lookup=False,
+        http_client=spa_client,
+    )
+    rep = analyzer.analyze("https://rizeworld.in/")
+    assert rep.status == "COMPLETED"
+    audit_by_id = {item["id"]: item["status"] for item in rep.moz_spam_audit}
+    assert audit_by_id["S01"] == "PASS", f"S01 should PASS, got {rep.moz_spam_audit[0]}"
+    assert audit_by_id["S08"] == "PASS", "S08 (Phone Number '90246 15510') should PASS"
+    assert audit_by_id["S09"] == "PASS", "S09 (Social Links) should PASS"
+    assert audit_by_id["S10"] == "PASS", "S10 (Contact Email) should PASS"
+    assert audit_by_id["S13"] == "PASS", "S13 (Verified Business Footprint) should PASS"
+    assert rep.moz_spam_score_pct <= 2.0
+    assert rep.moz_spam_risk_level == "Low"
+    assert rep.scored_pages_count >= 5
+
+
 # ==============================================================================
 # 4. INTERACTIVE WEB UI & REST API ENDPOINT TESTS
 # ==============================================================================

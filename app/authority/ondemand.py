@@ -701,7 +701,11 @@ def compute_moz_spam_score(
 
     # S09: Links to LinkedIn / Corporate Social Profile (Moz Signal #9)
     if has_live_html or (n_int + n_ext) > 0:
-        has_social = any(any(bd in e.target_domain for bd in BRAND_TRUST_DOMAINS) for e in external_links) or is_spa_shell
+        has_social = (
+            any(any(bd in e.target_domain for bd in BRAND_TRUST_DOMAINS) for e in external_links)
+            or bool(has_live_html and getattr(target_summary, "has_social_links", False))
+            or is_spa_shell
+        )
         s09 = not has_social
         record_signal("S09", "Links to LinkedIn / Social Absence", "Technical Trust", s09, "No LinkedIn/social profile links found" if s09 else "Social profile links present")
     else:
@@ -729,10 +733,22 @@ def compute_moz_spam_score(
         record_signal("S12", "Deprecated Meta Keywords Tag", "On-Page HTML", None, "Requires live HTML")
 
     # S13: Visit Rank (Moz Signal #13: Low Clickstream / Traffic Rank or Link-to-Traffic Inversion)
+    has_verified_business_identity = bool(
+        has_live_html
+        and (target_summary.has_phone or target_summary.has_email)
+        and (
+            getattr(target_summary, "has_social_links", False)
+            or any(any(bd in e.target_domain for bd in BRAND_TRUST_DOMAINS) for e in external_links)
+        )
+        and not s02
+        and not s11
+        and not s12
+    )
     has_visit_rank = (
         (tranco_rank is not None and tranco_rank <= 500_000)
         or (majestic_metrics is not None and majestic_metrics[0] <= 500_000)
         or (archive_snapshots >= 20)
+        or has_verified_business_identity
     )
     s13 = (not has_visit_rank) or traffic_to_link_inversion
     if traffic_to_link_inversion:
@@ -742,7 +758,13 @@ def compute_moz_spam_score(
             f"Tranco #{tranco_rank:,}" if tranco_rank is not None
             else (
                 f"Majestic #{majestic_metrics[0]:,}" if majestic_metrics is not None
-                else (f"Archive footprint ({archive_snapshots} snapshots)" if archive_snapshots >= 20 else "Low/Unranked in Tranco 1M & Majestic 1M")
+                else (
+                    f"Archive footprint ({archive_snapshots} snapshots)" if archive_snapshots >= 20
+                    else (
+                        "Verified business footprint (Contact + Social + HTTPS)" if has_verified_business_identity
+                        else "Low/Unranked in Tranco 1M & Majestic 1M"
+                    )
+                )
             )
         )
     record_signal("S13", "Low Visit Rank (Traffic Absence)", "Site Footprint", s13, rank_detail)
@@ -1149,7 +1171,7 @@ def merge_and_get_cached_signals(
                 return False
             return True
 
-        prev_live = cached.get("live", {}) if cached.get("schema_v", 0) >= 4 else {}
+        prev_live = cached.get("live", {}) if cached.get("schema_v", 0) >= 5 else {}
         merged_pages: Dict[str, CrawledPageSummary] = {}
         for u_k, p_dict in prev_live.get("pages_serialized", {}).items():
             if isinstance(p_dict, dict):
@@ -1177,7 +1199,7 @@ def merge_and_get_cached_signals(
 
         if merged_arch["source_active"] or merged_rdap["source_active"] or merged_pages:
             _DOMAIN_SIGNAL_CACHE[site_boundary] = {
-                "schema_v": 4,
+                "schema_v": 5,
                 "archive": merged_arch,
                 "rdap": merged_rdap,
                 "live": {
@@ -1224,6 +1246,7 @@ class CrawledPageSummary:
     has_doubleclick: bool = False
     has_email: bool = False
     has_phone: bool = False
+    has_social_links: bool = False
     formatting_tags_count: int = 0
     ad_markers_count: int = 0
     visible_word_count: int = 0
@@ -1766,50 +1789,249 @@ class OnDemandAuthorityAnalyzer:
             meta: ParsedHTMLMetadata = HTMLProcessor.parse_metadata(html_text)
             links: List[ExtractedLinkOccurrence] = LinkExtractor.extract_links(html_text, final_norm_url)
 
-            # Calculate Moz 27-Signal Spam Score on-page HTML signals
+            # Calculate Moz 27-Signal Spam Score on-page HTML signals + React/Vite/Next JS bundle signals
             html_lower = html_text.lower()
             html_bytes = len(html_text.encode("utf-8", errors="ignore"))
             soup = BeautifulSoup(html_text, "lxml")
+
+            # Discover local application JS bundles for client-rendered sites (React, Vite, Next.js, Vue, Angular)
+            js_bundle_texts: List[str] = []
+            candidate_script_urls: List[str] = []
+            _skip_script_tokens = (
+                "googletagmanager", "google-analytics", "googlesyndication", "doubleclick",
+                "connect.facebook", "clarity.ms", "hotjar", "cloudflareinsights", "plausible",
+                "jquery", "bootstrap", "popper", "gsap", "swiper", "aos.js", "lottie",
+                "recaptcha", "gstatic.com", "googleapis.com",
+            )
+            for sc_tag in soup.find_all("script", src=True):
+                raw_src = (sc_tag.get("src") or "").strip()
+                if not raw_src or any(tok in raw_src.lower() for tok in _skip_script_tokens):
+                    continue
+                full_sc_url = urljoin(final_norm_url, raw_src)
+                sc_host = (urlsplit(full_sc_url).hostname or "").lower()
+                if (not sc_host or site_boundary in sc_host) and ".js" in full_sc_url.lower():
+                    if full_sc_url not in candidate_script_urls:
+                        candidate_script_urls.append(full_sc_url)
+
+            has_spa_markers = any(
+                tok in html_lower
+                for tok in (
+                    "id=\"root\"", "id='root'", "id=\"__next\"", "id='__next'",
+                    "id=\"app\"", "id='app'", "<app-root", "ng-version",
+                    "type=\"module\"", "type='module'", "/assets/index", "/static/js/", "/_next/static/",
+                )
+            )
+            if candidate_script_urls and (has_spa_markers or len(links) < 6):
+                for sc_url in candidate_script_urls[:3]:
+                    try:
+                        sc_resp = client.get(sc_url, timeout=2.5)
+                        if sc_resp.status_code == 200 and sc_resp.text:
+                            # Cap inspected bundle text to first 1.5MB for speed
+                            js_bundle_texts.append(sc_resp.text[:1_500_000])
+                    except Exception:
+                        pass
+
+            combined_source = html_text + ("\n" + "\n".join(js_bundle_texts) if js_bundle_texts else "")
+            combined_lower = combined_source.lower()
+
             meta_kw_tag = soup.find("meta", attrs={"name": lambda x: x and x.lower() == "keywords"})
             has_meta_kw = bool(meta_kw_tag)
             meta_kw_len = len((meta_kw_tag.get("content") or "").strip()) if meta_kw_tag else 0
             has_gtm = any(
-                tok in html_lower
+                tok in combined_lower
                 for tok in (
                     "googletagmanager.com", "gtm-", "gtag(", "google-analytics.com",
                     "analytics.js", "cloudflareinsights.com", "clarity.ms", "plausible.io",
+                    "ga('create'", "dataLayer",
                 )
             )
-            has_favicon = bool(soup.find("link", attrs={"rel": lambda x: x and any("icon" in r.lower() and "apple" not in r.lower() for r in (x if isinstance(x, list) else [x]))})) or ("favicon" in html_lower)
+            has_favicon = bool(soup.find("link", attrs={"rel": lambda x: x and any("icon" in r.lower() and "apple" not in r.lower() for r in (x if isinstance(x, list) else [x]))})) or ("favicon" in combined_lower)
             has_apple_icon = bool(soup.find("link", attrs={"rel": lambda x: x and any("apple-touch-icon" in r.lower() for r in (x if isinstance(x, list) else [x]))}))
             has_font_api = any(
-                tok in html_lower
+                tok in combined_lower
                 for tok in (
                     "fonts.googleapis.com", "fonts.gstatic.com", "use.typekit.net",
                     "use.fontawesome.com", "@font-face", ".woff2", "font-family",
                 )
             )
             has_fb_pixel = any(
-                tok in html_lower
-                for tok in ("connect.facebook.net", "fbq(", "property=\"og:", "property='og:", "name=\"twitter:")
+                tok in combined_lower
+                for tok in (
+                    "connect.facebook.net", "fbq(", "property=\"og:", "property='og:",
+                    "name=\"twitter:", "facebook.com", "instagram.com", "linkedin.com",
+                )
             )
-            has_doubleclick = ("doubleclick.net" in html_lower) or ("googlesyndication.com" in html_lower)
+            has_doubleclick = any(
+                tok in combined_lower
+                for tok in (
+                    "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+                    "adsbygoogle", "googletag",
+                )
+            )
             formatting_tags_count = len(soup.find_all(["strong", "b", "em", "i", "u", "ul", "ol", "li", "p", "h1", "h2", "h3", "blockquote", "code", "table"]))
+            if js_bundle_texts and formatting_tags_count < 10:
+                formatting_tags_count += sum(
+                    combined_lower.count(tok)
+                    for tok in ("\"h1\"", "\"h2\"", "\"h3\"", "\"p\"", "\"ul\"", "\"li\"", "\"strong\"", "className")
+                )
             ad_markers_count = sum(html_lower.count(tok) for tok in ("googlesyndication", "doubleclick.net", "adservice.google", "taboola", "outbrain", "mgid", "adnxs.com", "popads"))
+
+            # Comprehensive Contact Email Detection (HTML + JS bundles + Cloudflare protection)
+            _ignored_email_exts = (
+                ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
+                ".css", ".js", ".map", ".woff", ".woff2", ".ttf", ".eot",
+            )
+            found_valid_email = False
+            for em_match in re.finditer(r"\b[a-zA-Z0-9._%+-]+@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,15})\b", combined_source):
+                full_em = em_match.group(0).lower()
+                dom_em = em_match.group(1).lower()
+                if not dom_em.endswith(_ignored_email_exts) and not any(x in dom_em for x in ("sentry.io", "webpack", "babel", "reactjs", "vitejs")):
+                    found_valid_email = True
+                    break
+
             has_email = (
-                ("mailto:" in html_lower)
-                or bool(re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html_text))
-                or ("/contact" in html_lower)
+                ("mailto:" in combined_lower)
+                or ("data-cfemail=" in combined_lower)
+                or ("/cdn-cgi/l/email-protection" in combined_lower)
+                or found_valid_email
+                or ("/contact" in combined_lower)
             )
+
+            # Comprehensive Phone Number Detection (Indian 5+5 spaced '90246 15510', +91, WhatsApp, Landlines & International)
             has_phone = (
-                ("tel:" in html_lower)
-                or bool(re.search(r"(?:\+?\d{1,3}[\s.-]?)?\(?\d{3,4}\)?[\s.-]\d{3}[\s.-]\d{4}", html_text))
-                or bool(re.search(r"(?:\+91[\s.-]?)?[6-9]\d{9}", html_text))
+                ("tel:" in combined_lower)
+                or ("callto:" in combined_lower)
+                or ("wa.me/" in combined_lower)
+                or ("api.whatsapp.com/send" in combined_lower)
+                or bool(re.search(r"(?:\+?91[\s.\-()]*)?0?[6-9]\d{4}[\s.\-]*\d{5}\b", combined_source))
+                or bool(re.search(r"(?:\+?91[\s.\-()]*)?0?[6-9]\d{2,3}[\s.\-]+\d{3}[\s.\-]+\d{3,4}\b", combined_source))
+                or bool(re.search(r"\b0\d{2,4}[\s.\-]+\d{6,8}\b", combined_source))
+                or bool(re.search(r"\b1800[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}\b", combined_source))
+                or bool(re.search(r"(?:\+?\d{1,3}[\s.-]?)?\(?\d{3,4}\)?[\s.-]\d{3}[\s.-]\d{4}\b", combined_source))
+                or bool(re.search(r'(?:phone|telephone|mobile|whatsapp|call\s*us|contact\s*no)["\'\s:=>]{1,15}[\'"]?\+?\d[\d\s().\-]{7,16}\d', combined_lower))
             )
+
+            # Comprehensive Social Profile Detection & Extraction (from HTML, JSON-LD, and JS Bundles)
+            existing_link_targets = {lnk.normalized_target_url.lower() for lnk in links}
+            social_url_matches = re.findall(
+                r"https?://(?:www\.|[a-z]{2}\.)?(?:linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|youtube\.com|github\.com|pinterest\.com|threads\.net|t\.me|wa\.me|whatsapp\.com|behance\.net|dribbble\.com|medium\.com|trustpilot\.com|crunchbase\.com)(?:/[a-zA-Z0-9_./?=&%\-@+]*)?",
+                combined_source,
+            )
+            for soc_url in social_url_matches:
+                clean_soc = soc_url.rstrip(".,;'\")}\\")
+                soc_norm = CanonicalURLNormalizer.normalize_url(clean_soc, base_url=final_norm_url)
+                if soc_norm.is_valid_web_url and soc_norm.normalized_url.lower() not in existing_link_targets:
+                    existing_link_targets.add(soc_norm.normalized_url.lower())
+                    links.append(
+                        ExtractedLinkOccurrence(
+                            raw_target_url=clean_soc,
+                            normalized_target_url=soc_norm.normalized_url,
+                            anchor_text=soc_norm.domain.site_boundary,
+                            rel_attributes="",
+                            dom_context="footer",
+                            is_internal=False,
+                        )
+                    )
+
+            has_social_links = (
+                bool(social_url_matches)
+                or any(
+                    tok in combined_lower
+                    for tok in (
+                        "linkedin.com/", "facebook.com/", "instagram.com/", "twitter.com/",
+                        "youtube.com/", "github.com/", "pinterest.com/", "wa.me/", "api.whatsapp.com",
+                        "lucide-linkedin", "lucide-facebook", "lucide-instagram",
+                        "fa-linkedin", "fa-facebook", "fa-instagram", "bi-linkedin", "bi-instagram",
+                        "aria-label=\"linkedin\"", "aria-label=\"instagram\"", "aria-label=\"facebook\"",
+                    )
+                )
+            )
+
+            # Extract Internal Routes & Pages from JS Bundles (React Router / Next.js / Vite SPAs)
+            if js_bundle_texts:
+                js_joined = "\n".join(js_bundle_texts)
+                discovered_internal_paths: Set[str] = set()
+                for m_route in re.finditer(
+                    r'(?:path|to|href|url|route|link|slug)\s*[:=]\s*["\'](/[a-zA-Z0-9][a-zA-Z0-9_/\-]{1,65})["\']',
+                    js_joined,
+                ):
+                    discovered_internal_paths.add(m_route.group(1))
+                for m_nav in re.finditer(
+                    r'["\'](/(?:about|about-us|services|portfolio|locations|company|resources|contact|contact-us|blog|blogs|faq|faqs|pricing|careers|team|our-team|case-studies|testimonials|privacy|privacy-policy|terms|projects|work|solutions|products|features|industries|clients|partners|news|events|support|help|seo|digital-marketing|social-media|web-development|content-marketing|graphic-design|paid-ads)(?:/[a-zA-Z0-9_\-]+)?)["\']',
+                    js_joined,
+                    re.IGNORECASE,
+                ):
+                    discovered_internal_paths.add(m_nav.group(1))
+                for m_full in re.finditer(
+                    rf'https?://(?:www\.)?{re.escape(site_boundary)}(/[a-zA-Z0-9_/\-]{{1,75}})',
+                    js_joined,
+                ):
+                    discovered_internal_paths.add(m_full.group(1))
+
+                _skip_route_prefixes = ("/assets/", "/static/", "/_next/", "/cdn-cgi/", "/api/", "/wp-json/")
+                for r_path in sorted(discovered_internal_paths):
+                    r_low = r_path.lower()
+                    if any(r_low.startswith(pref) for pref in _skip_route_prefixes):
+                        continue
+                    if any(r_low.endswith(ext) for ext in SKIP_EXTENSIONS):
+                        continue
+                    full_int_url = urljoin(final_norm_url, r_path)
+                    int_norm = CanonicalURLNormalizer.normalize_url(full_int_url, base_url=final_norm_url)
+                    if (
+                        int_norm.is_valid_web_url
+                        and int_norm.domain.site_boundary == site_boundary
+                        and int_norm.normalized_url.lower() not in existing_link_targets
+                    ):
+                        existing_link_targets.add(int_norm.normalized_url.lower())
+                        links.append(
+                            ExtractedLinkOccurrence(
+                                raw_target_url=r_path,
+                                normalized_target_url=int_norm.normalized_url,
+                                anchor_text=r_path.strip("/").replace("-", " ").title() or "Internal Page",
+                                rel_attributes="",
+                                dom_context="nav",
+                                is_internal=True,
+                            )
+                        )
+
+            # Fallback Sitemap.xml page discovery when page has very few static HTML links
+            if len([l for l in links if site_boundary in l.normalized_target_url]) <= 2 and self._custom_client is None:
+                try:
+                    sm_url = urljoin(final_norm_url, "/sitemap.xml")
+                    sm_resp = client.get(sm_url, timeout=1.8)
+                    if sm_resp.status_code == 200 and "<loc>" in (sm_resp.text or ""):
+                        for loc_m in re.finditer(r"<loc>\s*(https?://[^<\s]+)\s*</loc>", sm_resp.text):
+                            loc_u = loc_m.group(1).strip()
+                            loc_norm = CanonicalURLNormalizer.normalize_url(loc_u, base_url=final_norm_url)
+                            if (
+                                loc_norm.is_valid_web_url
+                                and loc_norm.domain.site_boundary == site_boundary
+                                and is_crawlable_html_url(loc_norm.normalized_url)
+                                and loc_norm.normalized_url.lower() not in existing_link_targets
+                            ):
+                                existing_link_targets.add(loc_norm.normalized_url.lower())
+                                links.append(
+                                    ExtractedLinkOccurrence(
+                                        raw_target_url=loc_u,
+                                        normalized_target_url=loc_norm.normalized_url,
+                                        anchor_text="Sitemap Page",
+                                        rel_attributes="",
+                                        dom_context="nav",
+                                        is_internal=True,
+                                    )
+                                )
+                                if len(existing_link_targets) >= 45:
+                                    break
+                except Exception:
+                    pass
 
             for s_tag in soup(["script", "style", "noscript"]):
                 s_tag.decompose()
             vis_text = soup.get_text(separator=" ", strip=True)
+            if js_bundle_texts and len(vis_text) < 400:
+                js_phrases = re.findall(r'["\']([A-Z][A-Za-z0-9 ,.&\'’\-/()]{18,160})["\']', "\n".join(js_bundle_texts))
+                if js_phrases:
+                    vis_text = (vis_text + " " + " ".join(js_phrases[:80])).strip()
             vis_bytes = len(vis_text.encode("utf-8", errors="ignore"))
             if vis_bytes == 0 and not (meta.title or "").strip() and len(links) == 0:
                 return None
@@ -1833,9 +2055,12 @@ class OnDemandAuthorityAnalyzer:
                 return None
             vis_words = len(vis_text.split())
             ratio = (vis_bytes / float(html_bytes)) if html_bytes > 0 else 0.25
-            is_js_spa = (
-                vis_bytes < 250
-                and any(tok in html_lower for tok in ("<app-root", "ng-version", "id=\"root\"", "id=\"__next\"", "id=\"app\"", "<script"))
+            is_js_spa = bool(
+                has_spa_markers
+                or (
+                    vis_bytes < 250
+                    and any(tok in html_lower for tok in ("<app-root", "ng-version", "id=\"root\"", "id=\"__next\"", "id=\"app\"", "<script"))
+                )
             )
 
             int_count = 0
@@ -1877,6 +2102,7 @@ class OnDemandAuthorityAnalyzer:
                 has_doubleclick=has_doubleclick,
                 has_email=has_email,
                 has_phone=has_phone,
+                has_social_links=has_social_links,
                 formatting_tags_count=formatting_tags_count,
                 ad_markers_count=ad_markers_count,
                 visible_word_count=vis_words,
