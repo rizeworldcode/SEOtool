@@ -5295,12 +5295,15 @@ class LinkPilotWebHandler(BaseHTTPRequestHandler):
         else:
             body_bytes = json.dumps(payload, default=str).encode("utf-8")
 
-        self.send_response(status_code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body_bytes)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body_bytes)
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body_bytes)
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug(f"Client disconnected before response finished for {self.path}")
 
     def do_GET(self) -> None:
         self._dispatch("GET")
@@ -5311,6 +5314,13 @@ class LinkPilotWebHandler(BaseHTTPRequestHandler):
         self._dispatch("POST", raw_body=raw_body)
 
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with immediate socket address reuse and daemon worker threads."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def create_web_server(
     host: str = "127.0.0.1",
     port: int = 8501,
@@ -5318,8 +5328,14 @@ def create_web_server(
 ) -> ThreadingHTTPServer:
     """Create and configure a ThreadingHTTPServer instance for the LinkPilot Web UI."""
     LinkPilotWebHandler.db_path = db_path
-    server = ThreadingHTTPServer((host, port), LinkPilotWebHandler)
-    return server
+    try:
+        return ReusableThreadingHTTPServer((host, port), LinkPilotWebHandler)
+    except OSError as exc:
+        # If default local port is already in use, bind next available port automatically
+        if port != 0 and getattr(exc, "errno", None) in (48, 98, 10048):
+            logger.warning(f"Port {port} is already in use on {host}; binding an available port instead.")
+            return ReusableThreadingHTTPServer((host, 0), LinkPilotWebHandler)
+        raise
 
 
 def run_web_server(
@@ -5329,7 +5345,9 @@ def run_web_server(
 ) -> None:
     """Start the LinkPilot Interactive Web UI server and block until interrupted."""
     server = create_web_server(host=host, port=port, db_path=db_path)
-    actual_host, actual_port = server.server_address
+    addr = server.server_address
+    actual_host = str(addr[0]) if isinstance(addr, tuple) and len(addr) >= 1 else host
+    actual_port = int(addr[1]) if isinstance(addr, tuple) and len(addr) >= 2 else port
     logger.info(f"LinkPilot AI Web UI running at http://{actual_host}:{actual_port}")
     try:
         server.serve_forever()
