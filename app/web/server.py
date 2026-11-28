@@ -48,10 +48,6 @@ from app.web.pages import get_footer_page_html, is_footer_page
 # Trigger background dataset warmup on server module load so first request is instant
 warmup_authority_datasets_async("./data/linkpilot.db")
 
-# Capture server startup date in IST (UTC+5:30) for today's 8:15 PM IST launch countdown
-_IST_TZ = timezone(timedelta(hours=5, minutes=30))
-SERVER_LAUNCH_DATE_IST = datetime.now(_IST_TZ).strftime("%Y-%m-%d")
-
 
 # ==============================================================================
 # IN-MEMORY SESSION HISTORY STORE
@@ -3503,52 +3499,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <!-- 8:20 PM Today Official Launch Countdown & Automatic Ribbon-Cutting Overlay -->
-  <div id="launchCountdownOverlay" class="launch-countdown-overlay" aria-live="polite">
-    <div class="launch-curtain-left"></div>
-    <div class="launch-curtain-right"></div>
-
-    <div class="launch-ribbon-track">
-      <div class="launch-ribbon-half launch-ribbon-left"></div>
-      <div class="launch-ribbon-bow" title="Automatic Grand Opening Ribbon">✂️</div>
-      <div class="launch-ribbon-half launch-ribbon-right"></div>
-    </div>
-
-    <canvas id="launchConfettiCanvas" class="launch-confetti-canvas"></canvas>
-
-    <div class="launch-welcome-burst">
-      <div class="launch-welcome-pill">🎉 RizeMetrics is Now Live! 🚀</div>
-    </div>
-
-    <div class="launch-countdown-card">
-      <div class="launch-brand-row">
-        <img src="/logo.png" alt="RizeMetrics Logo" />
-        <div class="launch-brand-name">
-          <span style="color: #ee591e;">Rize</span><span style="color: #2a7c37;">Metrics</span>
-        </div>
-      </div>
-      <h2 class="launch-title">We Are Launching Tonight at 9:15 PM!</h2>
-      <p class="launch-subtitle">
-        Get ready for unlimited Domain Authority (DA), Page Authority (PA), Bulk URL CSV Analysis &amp; 27-Signal Spam Score Intelligence. The ribbon cuts automatically when the timer hits zero.
-      </p>
-      <div class="launch-timer-grid" style="margin-bottom: 0.25rem;">
-        <div class="launch-time-box">
-          <span class="launch-time-num" id="cdHours">00</span>
-          <span class="launch-time-label">Hours</span>
-        </div>
-        <span class="launch-time-sep">:</span>
-        <div class="launch-time-box">
-          <span class="launch-time-num" id="cdMinutes">00</span>
-          <span class="launch-time-label">Minutes</span>
-        </div>
-        <span class="launch-time-sep">:</span>
-        <div class="launch-time-box">
-          <span class="launch-time-num" id="cdSeconds">00</span>
-          <span class="launch-time-label">Seconds</span>
-        </div>
-      </div>
-    </div>
-  </div>
 
   <!-- Floating Navigation Bar with Image 2 Signature Capsule + RW Logo -->
   <header class="nav-container">
@@ -5102,169 +5052,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       }
     }
 
-    function fireRibbonConfetti() {
-      const canvas = document.getElementById('launchConfettiCanvas');
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d');
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-
-      const colors = ['#ee591e', '#2a7c37', '#d9f942', '#eab308', '#ef4444', '#38bdf8', '#a855f7'];
-      const particles = [];
-      const cx = canvas.width / 2;
-      const cy = canvas.height / 2;
-
-      for (let i = 0; i < 150; i++) {
-        const angle = Math.random() * Math.PI * 2;
-        const speed = 5 + Math.random() * 16;
-        particles.push({
-          x: cx,
-          y: cy,
-          vx: Math.cos(angle) * speed,
-          vy: Math.sin(angle) * speed - (3 + Math.random() * 6),
-          w: 7 + Math.random() * 8,
-          h: 5 + Math.random() * 6,
-          color: colors[i % colors.length],
-          rot: Math.random() * 360,
-          vRot: (Math.random() - 0.5) * 14,
-          alpha: 1
-        });
-      }
-
-      function animateConfetti() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        let alive = false;
-        for (const p of particles) {
-          p.x += p.vx;
-          p.y += p.vy;
-          p.vy += 0.35;
-          p.vx *= 0.985;
-          p.rot += p.vRot;
-          p.alpha -= 0.008;
-          if (p.alpha > 0 && p.y < canvas.height + 40) {
-            alive = true;
-            ctx.save();
-            ctx.globalAlpha = Math.max(0, p.alpha);
-            ctx.translate(p.x, p.y);
-            ctx.rotate((p.rot * Math.PI) / 180);
-            ctx.fillStyle = p.color;
-            ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
-            ctx.restore();
-          }
-        }
-        if (alive) {
-          requestAnimationFrame(animateConfetti);
-        }
-      }
-      requestAnimationFrame(animateConfetti);
-    }
-
-    function triggerRibbonOpeningCeremony(overlay) {
-      if (window._ribbonCeremonyRunning) return;
-      window._ribbonCeremonyRunning = true;
-
-      safeSetText('cdHours', '00');
-      safeSetText('cdMinutes', '00');
-      safeSetText('cdSeconds', '00');
-
-      // Start ribbon slice + curtain reveal + confetti burst
-      overlay.classList.add('opening');
-      document.body.classList.remove('launch-locked');
-      document.body.classList.add('launch-revealing');
-      fireRibbonConfetti();
-
-      setTimeout(() => {
-        overlay.classList.add('opening-fadeout');
-      }, 1700);
-
-      setTimeout(() => {
-        overlay.classList.remove('active', 'opening', 'opening-fadeout');
-        document.body.classList.remove('launch-revealing');
-        window._ribbonCeremonyRunning = false;
-      }, 2400);
-    }
-
-    function initLaunchCountdownGate() {
-      const overlay = document.getElementById('launchCountdownOverlay');
-      if (!overlay) return;
-
-      // Launch target: Today at 9:15 PM (21:15:00) IST (UTC+05:30)
-      const LAUNCH_HOUR = 21;
-      const LAUNCH_MINUTE = 15;
-      const LAUNCH_SECOND = 0;
-      const ALLOWED_LAUNCH_DATES = new Set(['__SERVER_LAUNCH_DATE_IST__', '2026-11-27']);
-
-      function getRemainingLaunchMs() {
-        const now = new Date();
-        // Convert current UTC epoch to IST (UTC + 5h 30m)
-        const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
-        const istNow = new Date(now.getTime() + istOffsetMs);
-
-        const yyyy = istNow.getUTCFullYear();
-        const mm = String(istNow.getUTCMonth() + 1).padStart(2, '0');
-        const dd = String(istNow.getUTCDate()).padStart(2, '0');
-        const todayIstStr = `${yyyy}-${mm}-${dd}`;
-
-        if (!ALLOWED_LAUNCH_DATES.has(todayIstStr)) {
-          return 0;
-        }
-
-        const curHours = istNow.getUTCHours();
-        const curMins = istNow.getUTCMinutes();
-        const curSecs = istNow.getUTCSeconds();
-        const curMillis = istNow.getUTCMilliseconds();
-
-        const elapsedTodayMs = ((curHours * 3600) + (curMins * 60) + curSecs) * 1000 + curMillis;
-        const targetTodayMs = ((LAUNCH_HOUR * 3600) + (LAUNCH_MINUTE * 60) + LAUNCH_SECOND) * 1000;
-        return targetTodayMs - elapsedTodayMs;
-      }
-
-      let wasCountingDown = false;
-
-      function updateCountdownDisplay() {
-        const remMs = getRemainingLaunchMs();
-        if (remMs <= 0) {
-          if (window._launchCountdownTimer) {
-            clearInterval(window._launchCountdownTimer);
-            window._launchCountdownTimer = null;
-          }
-          if (wasCountingDown || overlay.classList.contains('active')) {
-            triggerRibbonOpeningCeremony(overlay);
-          } else {
-            overlay.classList.remove('active');
-            document.body.classList.remove('launch-locked');
-          }
-          return;
-        }
-
-        wasCountingDown = true;
-        if (!overlay.classList.contains('active')) {
-          overlay.classList.add('active');
-          document.body.classList.add('launch-locked');
-        }
-
-        const totalSeconds = Math.ceil(remMs / 1000);
-        const hours = Math.floor(totalSeconds / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
-        const seconds = totalSeconds % 60;
-
-        safeSetText('cdHours', String(hours).padStart(2, '0'));
-        safeSetText('cdMinutes', String(minutes).padStart(2, '0'));
-        safeSetText('cdSeconds', String(seconds).padStart(2, '0'));
-      }
-
-      updateCountdownDisplay();
-      if (getRemainingLaunchMs() > 0) {
-        window._launchCountdownTimer = setInterval(updateCountdownDisplay, 200);
-      }
-    }
-
-    // Run launch countdown gate immediately so there is zero unblurred flash before 8:15 PM
-    initLaunchCountdownGate();
-
     // Load history on startup; search bar is empty by default until user enters a link
     window.addEventListener('DOMContentLoaded', () => {
-      initLaunchCountdownGate();
       loadHistory();
       const input = document.getElementById('urlInput');
       const val = input ? input.value.trim() : '';
@@ -5275,7 +5064,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </script>
 </body>
 </html>
-""".replace("__SERVER_LAUNCH_DATE_IST__", SERVER_LAUNCH_DATE_IST)
+"""
 
 
 # ==============================================================================
